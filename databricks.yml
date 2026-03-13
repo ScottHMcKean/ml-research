@@ -1,0 +1,12 @@
+bundle:
+  name: distributed-xgboost-profiling
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      profile: DEFAULT

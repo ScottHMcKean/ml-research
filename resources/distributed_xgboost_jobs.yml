@@ -1,0 +1,47 @@
+resources:
+  jobs:
+    movielens_data_prep:
+      name: "[${bundle.target}] MovieLens Data Prep"
+      tasks:
+        - task_key: data_prep
+          notebook_task:
+            notebook_path: ../notebooks/distributed_xgboost/00_data_prep.py
+          new_cluster:
+            spark_version: "17.3.x-cpu-ml-scala2.13"
+            node_type_id: "Standard_D8ds_v5"
+            num_workers: 2
+            data_security_mode: SINGLE_USER
+
+    xgboost_profiling:
+      name: "[${bundle.target}] XGBoost Profiling"
+      job_clusters:
+        - job_cluster_key: shared_ml_cluster
+          new_cluster:
+            spark_version: "17.3.x-cpu-ml-scala2.13"
+            node_type_id: "Standard_D8ds_v5"
+            num_workers: 2
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.executor.memory: "2g"
+              spark.driver.memory: "2g"
+      tasks:
+        - task_key: train_ray
+          notebook_task:
+            notebook_path: ../notebooks/distributed_xgboost/03_xgboost_ray.py
+          job_cluster_key: shared_ml_cluster
+
+        - task_key: train_pyspark
+          depends_on:
+            - task_key: train_ray
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ../notebooks/distributed_xgboost/02_xgboost_pyspark.py
+          job_cluster_key: shared_ml_cluster
+
+        - task_key: train_python
+          depends_on:
+            - task_key: train_pyspark
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ../notebooks/distributed_xgboost/01_xgboost_python.py
+          job_cluster_key: shared_ml_cluster
