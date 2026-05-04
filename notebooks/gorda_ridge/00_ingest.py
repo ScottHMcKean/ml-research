@@ -4,21 +4,22 @@
 # MAGIC # Gorda Ridge — Ingest
 # MAGIC
 # MAGIC Pulls the Escanaba Trough sediment-core dataset from USGS ScienceBase
-# MAGIC ([doi:10.5066/P13B46QX](https://doi.org/10.5066/P13B46QX)) into the
-# MAGIC `ml.gordaridge` schema.
+# MAGIC ([doi:10.5066/P13B46QX](https://doi.org/10.5066/P13B46QX),
+# MAGIC [data release page](https://www.sciencebase.gov/catalog/item/67004442d34e80be174aea95))
+# MAGIC into the `shm.ml` schema with a `gordaridge_` table prefix.
 # MAGIC
 # MAGIC We keep four child items (the rest of the release is media zips or
 # MAGIC narrow analytical products):
 # MAGIC
-# MAGIC | Bronze table             | Source item             |
-# MAGIC | ------------------------ | ----------------------- |
-# MAGIC | `bronze_locations`       | TN403_CoreLocations.csv |
-# MAGIC | `bronze_xrf_geochem`     | XRF (geochem mode)      |
-# MAGIC | `bronze_xrf_soil`        | XRF (soil mode)         |
-# MAGIC | `bronze_mscl`            | Multi-Sensor Core Logger|
+# MAGIC | Bronze table                       | Source item             |
+# MAGIC | ---------------------------------- | ----------------------- |
+# MAGIC | `gordaridge_bronze_locations`      | TN403_CoreLocations.csv |
+# MAGIC | `gordaridge_bronze_xrf_geochem`    | XRF (geochem mode)      |
+# MAGIC | `gordaridge_bronze_xrf_soil`       | XRF (soil mode)         |
+# MAGIC | `gordaridge_bronze_mscl`           | Multi-Sensor Core Logger|
 # MAGIC
-# MAGIC Files land in the `raw` UC Volume; bronze tables are written next to
-# MAGIC them in the same schema.
+# MAGIC Files land in the `gordaridge_raw` UC Volume; bronze tables are written
+# MAGIC next to them in the same schema.
 
 # COMMAND ----------
 
@@ -33,9 +34,10 @@ from pathlib import Path
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType
 
-CATALOG = "ml"
-SCHEMA = "gordaridge"
-VOLUME = "raw"
+CATALOG = "shm"
+SCHEMA = "ml"
+PREFIX = "gordaridge_"
+VOLUME = "gordaridge_raw"
 VOL_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}"
 
 ITEMS = {
@@ -136,10 +138,10 @@ def replace_sentinel(df, cols, sentinel=SENTINEL):
 
 
 def write(df, name):
-    (df.write.mode("overwrite").option("overwriteSchema", "true")
-       .saveAsTable(f"{CATALOG}.{SCHEMA}.{name}"))
-    n = spark.table(f"{CATALOG}.{SCHEMA}.{name}").count()
-    print(f"wrote {CATALOG}.{SCHEMA}.{name}: {n:,} rows")
+    full = f"{CATALOG}.{SCHEMA}.{PREFIX}{name}"
+    (df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full))
+    n = spark.table(full).count()
+    print(f"wrote {full}: {n:,} rows")
 
 # COMMAND ----------
 
@@ -172,7 +174,7 @@ def read_xrf(vol_dir, mode):
     df = (
         spark.read.option("header", True).option("inferSchema", True)
         .csv(f"{vol_dir}/*.csv")
-        .withColumn("source_file", F.input_file_name())
+        .withColumn("source_file", F.col("_metadata.file_path"))
         .withColumn("mode", F.lit(mode))
         .withColumn("core_id", core_id_from_path(mode))
     )
@@ -198,7 +200,7 @@ write(read_xrf(f"{VOL_PATH}/xrf_soil", "soil"), "bronze_xrf_soil")
 mscl = (
     spark.read.option("header", True).option("inferSchema", True)
     .csv(f"{VOL_PATH}/mscl/*.csv")
-    .withColumn("source_file", F.input_file_name())
+    .withColumn("source_file", F.col("_metadata.file_path"))
     .withColumn("core_id", core_id_from_path(None))
 )
 for c in ("gamma_density", "magnetic_susceptibility", "core_depth"):
@@ -214,4 +216,4 @@ write(
 
 # COMMAND ----------
 
-display(spark.sql(f"SHOW TABLES IN {CATALOG}.{SCHEMA} LIKE 'bronze_*'"))
+display(spark.sql(f"SHOW TABLES IN {CATALOG}.{SCHEMA} LIKE '{PREFIX}bronze_*'"))

@@ -3,38 +3,41 @@ resources:
     gorda_ridge_pipeline:
       name: "[${bundle.target}] Gorda Ridge Pipeline"
       max_concurrent_runs: 1
-      job_clusters:
-        - job_cluster_key: gorda_cluster
-          new_cluster:
-            spark_version: "17.3.x-cpu-ml-scala2.13"
-            node_type_id: "Standard_D8ds_v5"
-            num_workers: 2
-            data_security_mode: SINGLE_USER
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: "5"
+            dependencies:
+              - matplotlib
+              - seaborn
+              - scikit-learn
+              - mlflow
+
       tasks:
         - task_key: ingest
-          job_cluster_key: gorda_cluster
+          environment_key: serverless
           notebook_task:
             notebook_path: ../notebooks/gorda_ridge/00_ingest.py
 
         - task_key: process
           depends_on:
             - task_key: ingest
-          job_cluster_key: gorda_cluster
+          environment_key: serverless
           notebook_task:
             notebook_path: ../notebooks/gorda_ridge/01_process.py
 
         - task_key: eda
           depends_on:
             - task_key: process
-          job_cluster_key: gorda_cluster
+          environment_key: serverless
           notebook_task:
             notebook_path: ../notebooks/gorda_ridge/02_eda.py
 
         - task_key: ml
           depends_on:
             - task_key: process
-          job_cluster_key: gorda_cluster
+          environment_key: serverless
           notebook_task:
             notebook_path: ../notebooks/gorda_ridge/03_ml.py
             base_parameters:
-              experiment_path: "/Shared/ml_gordaridge"
+              experiment_path: "/Shared/gordaridge"

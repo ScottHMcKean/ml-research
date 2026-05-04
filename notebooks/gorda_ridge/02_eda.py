@@ -3,7 +3,10 @@
 # MAGIC %md
 # MAGIC # Gorda Ridge — EDA
 # MAGIC
-# MAGIC Descriptive look at `ml.gordaridge.silver_xrf`:
+# MAGIC Source: USGS Escanaba Trough data release —
+# MAGIC [sciencebase.gov/catalog/item/67004442d34e80be174aea95](https://www.sciencebase.gov/catalog/item/67004442d34e80be174aea95).
+# MAGIC
+# MAGIC Descriptive look at `shm.ml.gordaridge_silver_xrf`:
 # MAGIC * sample counts per core / mode
 # MAGIC * below-detection rates per element
 # MAGIC * log-element distributions
@@ -16,16 +19,17 @@
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-CATALOG = "ml"
-SCHEMA = "gordaridge"
+CATALOG = "shm"
+SCHEMA = "ml"
+PREFIX = "gordaridge_"
 XRF_ELEMENTS = ("Mn", "Fe", "Cu", "Pb", "S", "Ca")
 
 sns.set_theme(context="notebook", style="whitegrid")
 
 # COMMAND ----------
 
-xrf = spark.table(f"{CATALOG}.{SCHEMA}.silver_xrf").toPandas()
-locs = spark.table(f"{CATALOG}.{SCHEMA}.bronze_locations").toPandas()
+xrf = spark.table(f"{CATALOG}.{SCHEMA}.{PREFIX}silver_xrf").toPandas()
+locs = spark.table(f"{CATALOG}.{SCHEMA}.{PREFIX}bronze_locations").toPandas()
 
 print(f"silver_xrf rows : {len(xrf):,}")
 print(f"cores           : {xrf['core_id'].nunique()}")
