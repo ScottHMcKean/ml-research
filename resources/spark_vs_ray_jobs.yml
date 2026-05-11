@@ -1,0 +1,43 @@
+resources:
+  jobs:
+    spark_vs_ray_base:
+      name: "[${bundle.target}] Spark vs Ray — base"
+      max_concurrent_runs: 1
+      job_clusters:
+        - job_cluster_key: gpu_single_node
+          new_cluster:
+            spark_version: 15.4.x-gpu-ml-scala2.12
+            node_type_id: Standard_NC4as_T4_v3
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            custom_tags:
+              ResourceClass: SingleNode
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*, 4]"
+      tasks:
+        - task_key: demo
+          job_cluster_key: gpu_single_node
+          notebook_task:
+            notebook_path: ../notebooks/spark_vs_ray/heterogeneous_nlp_demo_base.py
+
+    spark_vs_ray_optimized:
+      name: "[${bundle.target}] Spark vs Ray — optimized"
+      max_concurrent_runs: 1
+      job_clusters:
+        - job_cluster_key: gpu_single_node
+          new_cluster:
+            spark_version: 15.4.x-gpu-ml-scala2.12
+            node_type_id: Standard_NC4as_T4_v3
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            custom_tags:
+              ResourceClass: SingleNode
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*, 4]"
+      tasks:
+        - task_key: demo
+          job_cluster_key: gpu_single_node
+          notebook_task:
+            notebook_path: ../notebooks/spark_vs_ray/heterogeneous_nlp_demo_optimized.py
