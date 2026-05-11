@@ -260,7 +260,7 @@ from pyspark.sql.types import (
 )
 import pandas as pd
 
-# (2) Force small batches — same shape as customer's "checkpoint size" trick.
+# Force small batches — same shape as a checkpoint size trick.
 spark.conf.set("spark.sql.execution.arrow.maxRecordsPerBatch", "1000")
 
 _SENTS_T = ArrayType(StringType())
@@ -281,7 +281,7 @@ _SUMMARY_T = StructType([
     StructField("top_entity_type", StringType()),
 ])
 
-# (1) Module-global lazy load. Without this every Arrow batch reloads ~500MB.
+# Module-global lazy load. Without this every Arrow batch reloads ~500MB.
 _GPU_INFER_SINGLETON: dict = {}
 
 
@@ -307,7 +307,7 @@ def udf_stage2_infer(sents: pd.Series) -> pd.DataFrame:
     })
 
 
-# (3) Mark the GPU UDF non-deterministic — rerun-prevention hack.
+# Mark the GPU UDF non-deterministic — rerun-prevention hack.
 udf_stage2_infer = udf_stage2_infer.asNondeterministic()
 
 
@@ -322,7 +322,7 @@ with gpu_sampler() as spark_gpu:
     spark_df = (
         spark.table(DOCS_TABLE)
         .withColumn("sentences", udf_stage1_preprocess(F.col("content")))
-        .repartition(1)  # (4) GPU-affinity hack: serialize stage 2 onto 1 task
+        .repartition(1)  # GPU-affinity hack: serialize stage 2 onto 1 task
         .withColumn("nlp", udf_stage2_infer(F.col("sentences")))
         .withColumn("summary", udf_stage3_aggregate(F.col("nlp")))
         .select(
@@ -513,51 +513,7 @@ plt.show()
 
 # COMMAND ----------
 
-# MAGIC %md ## 9. Same Python, different wrappers
-# MAGIC
-# MAGIC `stage1_preprocess`, `Stage2GPUInfer`, and `stage3_aggregate` are
-# MAGIC unchanged across both jobs. What differs is the wrapping.
-# MAGIC
-# MAGIC ### Spark — three UDFs and four workarounds
-# MAGIC ```python
-# MAGIC spark.conf.set("spark.sql.execution.arrow.maxRecordsPerBatch", "1000")
-# MAGIC
-# MAGIC _GPU_INFER_SINGLETON = {}                                  # lazy model load
-# MAGIC def _get_gpu_infer():
-# MAGIC     if "p" not in _GPU_INFER_SINGLETON:
-# MAGIC         _GPU_INFER_SINGLETON["p"] = Stage2GPUInfer(device=0)
-# MAGIC     return _GPU_INFER_SINGLETON["p"]
-# MAGIC
-# MAGIC @pandas_udf(_SENTS_T)
-# MAGIC def udf_stage1_preprocess(content): ...
-# MAGIC @pandas_udf(_INFER_T)
-# MAGIC def udf_stage2_infer(sents): ...
-# MAGIC udf_stage2_infer = udf_stage2_infer.asNondeterministic()   # rerun-prevention
-# MAGIC @pandas_udf(_SUMMARY_T)
-# MAGIC def udf_stage3_aggregate(nlp): ...
-# MAGIC
-# MAGIC df = (spark.table(DOCS_TABLE)
-# MAGIC         .withColumn("sentences", udf_stage1_preprocess("content"))
-# MAGIC         .repartition(1)                                    # GPU-affinity hack
-# MAGIC         .withColumn("nlp",       udf_stage2_infer("sentences"))
-# MAGIC         .withColumn("summary",   udf_stage3_aggregate("nlp")))
-# MAGIC ```
-# MAGIC
-# MAGIC ### Ray — three thin shims, resources declared inline
-# MAGIC ```python
-# MAGIC def ray_stage1(batch): ...
-# MAGIC class RayStage2GPU:
-# MAGIC     def __init__(self): self.pipe = Stage2GPUInfer(device=0)
-# MAGIC     def __call__(self, batch): ...
-# MAGIC def ray_stage3(batch): ...
-# MAGIC
-# MAGIC ds = (ray.data.from_pandas(pdf)
-# MAGIC         .map_batches(ray_stage1,    num_cpus=2, concurrency=2, batch_size=128)
-# MAGIC         .map_batches(RayStage2GPU,  num_gpus=1, concurrency=1, batch_size=64)
-# MAGIC         .map_batches(ray_stage3,    num_cpus=2, concurrency=2, batch_size=128))
-# MAGIC ```
-# MAGIC
-# MAGIC ### What each Spark workaround replaces
+# MAGIC %md ## What each Spark workaround replaces
 # MAGIC | Need                                      | Spark workaround                          | Ray equivalent              |
 # MAGIC | ----------------------------------------- | ----------------------------------------- | --------------------------- |
 # MAGIC | Load the model once per process           | Module-global dict + lazy init            | Actor `__init__`            |

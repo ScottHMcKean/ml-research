@@ -309,7 +309,7 @@ from pyspark.sql.types import (
 )
 import pandas as pd
 
-# (1) Force small batches — customer's "checkpoint size" trick (5k cap).
+# Force small batches — checkpoint size trick (5k cap).
 spark.conf.set("spark.sql.execution.arrow.maxRecordsPerBatch", "1000")
 
 # ---- Schemas ---------------------------------------------------------------
@@ -373,7 +373,7 @@ with gpu_sampler() as spark_gpu:
         spark.table(DOCS_TABLE)
         .withColumn("sentences", udf_stage1_preprocess(F.col("content")))
         .select("doc_id", "sentences")
-        .repartition(1)  # (2) GPU-affinity hack: serialize stage 2 onto 1 task
+        .repartition(1)  # GPU-affinity hack: serialize stage 2 onto 1 task
     )
     stage2_df = stage1_df.mapInPandas(stage2_mapinpandas, schema=_STAGE2_OUT)
     spark_df = (
@@ -617,48 +617,7 @@ plt.show()
 
 # COMMAND ----------
 
-# MAGIC %md ## 9. Same Python, different wrappers
-# MAGIC
-# MAGIC The shared core (`stage1_preprocess`, `Stage2GPUInfer`, `unpack_raw`,
-# MAGIC `stage3_aggregate`) is unchanged. Wrapping is what differs.
-# MAGIC
-# MAGIC ### Spark — pandas_udf → mapInPandas → pandas_udf
-# MAGIC ```python
-# MAGIC spark.conf.set("spark.sql.execution.arrow.maxRecordsPerBatch", "1000")
-# MAGIC
-# MAGIC @pandas_udf(_SENTS_T)
-# MAGIC def udf_stage1_preprocess(content): ...
-# MAGIC
-# MAGIC def stage2_mapinpandas(iterator):                # one Python invocation
-# MAGIC     pipe = Stage2GPUInfer(device=0)              # → model loaded ONCE
-# MAGIC     for pdf in iterator:                         # → GPU stays warm
-# MAGIC         yield pd.DataFrame({...})
-# MAGIC
-# MAGIC @pandas_udf(_SUMMARY_T)
-# MAGIC def udf_stage3_aggregate(nlp): ...
-# MAGIC
-# MAGIC df = (spark.table(DOCS_TABLE)
-# MAGIC         .withColumn("sentences", udf_stage1_preprocess("content"))
-# MAGIC         .repartition(1)                          # GPU-affinity hack
-# MAGIC         .mapInPandas(stage2_mapinpandas, _STAGE2_OUT)
-# MAGIC         .withColumn("summary",   udf_stage3_aggregate(F.struct(...))))
-# MAGIC ```
-# MAGIC
-# MAGIC ### Ray — three thin shims, resources declared inline
-# MAGIC ```python
-# MAGIC def ray_stage1(batch): ...
-# MAGIC class RayStage2GPU:
-# MAGIC     def __init__(self): self.pipe = Stage2GPUInfer(device=0)
-# MAGIC     def __call__(self, batch): ...              # raw outputs only
-# MAGIC def ray_stage3(batch): ...                       # unpack + aggregate (CPU)
-# MAGIC
-# MAGIC ds = (ray.data.from_pandas(pdf)
-# MAGIC         .map_batches(ray_stage1,    num_cpus=2, concurrency=2, batch_size=128)
-# MAGIC         .map_batches(RayStage2GPU,  num_gpus=1, concurrency=1, batch_size=256)
-# MAGIC         .map_batches(ray_stage3,    num_cpus=2, concurrency=2, batch_size=128))
-# MAGIC ```
-# MAGIC
-# MAGIC ### Side-by-side
+# MAGIC %md ## Side-by-side
 # MAGIC | Need                                       | Spark approach                                              | Ray approach                       |
 # MAGIC | ------------------------------------------ | ----------------------------------------------------------- | ---------------------------------- |
 # MAGIC | Load the model once per process            | `mapInPandas` (one invocation per partition)                | Actor `__init__`                   |
@@ -729,3 +688,7 @@ plt.show()
 # MAGIC   pools — keep them in the same AZ or pay the bandwidth bill.
 # MAGIC - Failure handling: a CPU-pool node dropping mid-job only invalidates
 # MAGIC   that stage's in-flight batches. Worth testing for your workload.
+
+# COMMAND ----------
+
+
