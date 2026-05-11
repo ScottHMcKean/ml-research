@@ -3,6 +3,9 @@
 # MAGIC %md
 # MAGIC # Gorda Ridge — ML
 # MAGIC
+# MAGIC Source: USGS Escanaba Trough data release —
+# MAGIC [sciencebase.gov/catalog/item/67004442d34e80be174aea95](https://www.sciencebase.gov/catalog/item/67004442d34e80be174aea95).
+# MAGIC
 # MAGIC Treats every scanned depth interval as one observation in 6-D log-element
 # MAGIC space (Mn, Fe, Cu, Pb, S, Ca) and looks for sediment "facies" — recurring
 # MAGIC chemistries that cut across cores.
@@ -29,15 +32,20 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import StandardScaler
 
-CATALOG = "ml"
-SCHEMA = "gordaridge"
+CATALOG = "shm"
+SCHEMA = "ml"
+PREFIX = "gordaridge_"
 XRF_ELEMENTS = ("Mn", "Fe", "Cu", "Pb", "S", "Ca")
 K = 4
 RANDOM_STATE = 0
 
-dbutils.widgets.text("experiment_path", f"/Shared/{CATALOG}_{SCHEMA}",
+dbutils.widgets.text("experiment_path", f"/Shared/{PREFIX.rstrip('_')}",
                      "MLflow experiment path")
 EXPERIMENT_PATH = dbutils.widgets.get("experiment_path")
+
+
+def t(name):
+    return f"{CATALOG}.{SCHEMA}.{PREFIX}{name}"
 
 mlflow.set_experiment(EXPERIMENT_PATH)
 mlflow.set_registry_uri("databricks-uc")
@@ -49,7 +57,7 @@ print(f"experiment: {EXPERIMENT_PATH}")
 
 # COMMAND ----------
 
-silver = spark.table(f"{CATALOG}.{SCHEMA}.silver_xrf").toPandas()
+silver = spark.table(t("silver_xrf")).toPandas()
 feat_cols = [f"log_{el}" for el in XRF_ELEMENTS]
 
 work = silver[silver["mode"] == "geochem"].copy()
@@ -136,7 +144,7 @@ with mlflow.start_run(run_name=f"kmeans_k{K}") as run:
         artifact_path="kmeans",
         signature=signature,
         input_example=X.head(5),
-        registered_model_name=f"{CATALOG}.{SCHEMA}.xrf_kmeans",
+        registered_model_name=f"{CATALOG}.{SCHEMA}.{PREFIX}xrf_kmeans",
     )
     print("metrics:", metrics)
     print(f"run_id: {run.info.run_id}")
@@ -154,21 +162,45 @@ clusters["pc2"] = pcs[:, 1]
 
 (spark.createDataFrame(clusters)
    .write.mode("overwrite").option("overwriteSchema", "true")
-   .saveAsTable(f"{CATALOG}.{SCHEMA}.gold_xrf_clusters"))
+   .saveAsTable(t("gold_xrf_clusters")))
 (spark.createDataFrame(centroids_ppm)
    .write.mode("overwrite").option("overwriteSchema", "true")
-   .saveAsTable(f"{CATALOG}.{SCHEMA}.gold_xrf_centroids"))
+   .saveAsTable(t("gold_xrf_centroids")))
 
 display(spark.sql(f"""
   SELECT cluster, COUNT(*) AS n
-  FROM {CATALOG}.{SCHEMA}.gold_xrf_clusters
+  FROM {t('gold_xrf_clusters')}
   GROUP BY cluster
   ORDER BY cluster
 """))
 
 # COMMAND ----------
 
-display(spark.sql(f"SELECT * FROM {CATALOG}.{SCHEMA}.gold_xrf_centroids ORDER BY cluster"))
+display(spark.sql(f"SELECT * FROM {t('gold_xrf_centroids')} ORDER BY cluster"))
+
+# COMMAND ----------
+
+# MAGIC %md ## Narrative — what the four clusters look like
+# MAGIC
+# MAGIC From the run that materialised this schema (k=4 on the geochem mode):
+# MAGIC
+# MAGIC | cluster | Mn   | Fe     | Cu    | Pb  | S     | Ca    | reading                                  |
+# MAGIC | ------- | ---- | ------ | ----- | --- | ----- | ----- | ---------------------------------------- |
+# MAGIC | 0       | ~510 | ~24k   | ~38   | ~9  | ~1.1k | ~5.0k | "background" pelagic sediment            |
+# MAGIC | 1       | ~0   | ~1     | ~0    | ~0  | ~2    | ~2    | imputation floor — rows where every element was below detection and got median-filled near zero. Treat as a missingness bucket, not a real facies. |
+# MAGIC | 2       | ~49  | ~81k   | ~2.0k | 472 | ~7.0k | ~2.4k | hydrothermal end-member: Fe ≈ 3× background, big Cu/Pb/S spikes — consistent with massive-sulfide chimney debris near the Escanaba vents. |
+# MAGIC | 3       | ~458 | ~26k   | ~39   | ~5  | ~0    | ~2.0k | a sulfur-poor, slightly Mn-enriched twin of cluster 0 — likely diagenetically-reduced background.                                            |
+# MAGIC
+# MAGIC **Implications for future ML work**
+# MAGIC * Cluster 1 is an artefact of `fillna(median)` on rows where the entire
+# MAGIC   ppm panel was BDL. A meaningful next pass should either drop those rows
+# MAGIC   (`impute="drop"`) or model BDL explicitly (e.g. tobit / left-censored).
+# MAGIC * The hydrothermal class (cluster 2) is rare relative to background, so
+# MAGIC   downstream supervised tasks should expect heavy class imbalance.
+# MAGIC * `gold_site_summary.dominant_cluster` lets you map facies geographically
+# MAGIC   and check whether cluster-2 sites cluster spatially around the known
+# MAGIC   vent field — a quick sanity check that the chemistry is picking up
+# MAGIC   real geology, not core-handling noise.
 
 # COMMAND ----------
 
@@ -178,10 +210,10 @@ display(spark.sql(f"SELECT * FROM {CATALOG}.{SCHEMA}.gold_xrf_centroids ORDER BY
 
 # COMMAND ----------
 
-silver_xrf = spark.table(f"{CATALOG}.{SCHEMA}.silver_xrf").where(F.col("mode") == "geochem")
-silver_mscl = spark.table(f"{CATALOG}.{SCHEMA}.silver_mscl")
-clusters_sdf = spark.table(f"{CATALOG}.{SCHEMA}.gold_xrf_clusters")
-locs = spark.table(f"{CATALOG}.{SCHEMA}.bronze_locations")
+silver_xrf = spark.table(t("silver_xrf")).where(F.col("mode") == "geochem")
+silver_mscl = spark.table(t("silver_mscl"))
+clusters_sdf = spark.table(t("gold_xrf_clusters"))
+locs = spark.table(t("bronze_locations"))
 
 chem = silver_xrf.groupBy("site").agg(
     *[F.avg(f"{el}_ppm").alias(f"avg_{el}_ppm") for el in XRF_ELEMENTS]
@@ -209,12 +241,12 @@ site_summary = (
     )
 )
 (site_summary.write.mode("overwrite").option("overwriteSchema", "true")
-   .saveAsTable(f"{CATALOG}.{SCHEMA}.gold_site_summary"))
+   .saveAsTable(t("gold_site_summary")))
 
 display(spark.sql(f"""
   SELECT site, water_depth_m, dominant_cluster, n_samples,
          avg_Fe_ppm, avg_Mn_ppm, avg_Cu_ppm, avg_S_ppm,
          avg_gamma_density, avg_magnetic_susceptibility
-  FROM {CATALOG}.{SCHEMA}.gold_site_summary
+  FROM {t('gold_site_summary')}
   ORDER BY dominant_cluster, site
 """))

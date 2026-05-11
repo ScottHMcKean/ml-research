@@ -3,13 +3,16 @@
 # MAGIC %md
 # MAGIC # Gorda Ridge — Process
 # MAGIC
-# MAGIC Turns the bronze landings into a single analytics-ready table per
-# MAGIC sensor stream:
+# MAGIC Source: USGS Escanaba Trough data release —
+# MAGIC [sciencebase.gov/catalog/item/67004442d34e80be174aea95](https://www.sciencebase.gov/catalog/item/67004442d34e80be174aea95).
 # MAGIC
-# MAGIC | Silver table   | Built from                                       |
-# MAGIC | -------------- | ------------------------------------------------ |
-# MAGIC | `silver_xrf`   | `bronze_xrf_geochem` ∪ `bronze_xrf_soil` + locs  |
-# MAGIC | `silver_mscl`  | `bronze_mscl` + locs                             |
+# MAGIC Turns the bronze landings into a single analytics-ready table per
+# MAGIC sensor stream (all under `shm.ml` with a `gordaridge_` prefix):
+# MAGIC
+# MAGIC | Silver table              | Built from                                                                |
+# MAGIC | ------------------------- | ------------------------------------------------------------------------- |
+# MAGIC | `gordaridge_silver_xrf`   | `gordaridge_bronze_xrf_geochem` ∪ `gordaridge_bronze_xrf_soil` + locs     |
+# MAGIC | `gordaridge_silver_mscl`  | `gordaridge_bronze_mscl` + locs                                           |
 # MAGIC
 # MAGIC Adds:
 # MAGIC * a `site` column (`GC01-Y` → `GC01`) so we can roll up across the
@@ -22,8 +25,9 @@
 
 from pyspark.sql import functions as F
 
-CATALOG = "ml"
-SCHEMA = "gordaridge"
+CATALOG = "shm"
+SCHEMA = "ml"
+PREFIX = "gordaridge_"
 
 XRF_ELEMENTS = ("Mn", "Fe", "Cu", "Pb", "S", "Ca")
 
@@ -33,14 +37,18 @@ def site_from_core(col="core_id"):
     return F.regexp_replace(F.col(col), r"-[XYZ]$", "")
 
 
+def t(name):
+    return f"{CATALOG}.{SCHEMA}.{PREFIX}{name}"
+
+
 def write(df, name):
-    (df.write.mode("overwrite").option("overwriteSchema", "true")
-       .saveAsTable(f"{CATALOG}.{SCHEMA}.{name}"))
-    n = spark.table(f"{CATALOG}.{SCHEMA}.{name}").count()
-    print(f"wrote {CATALOG}.{SCHEMA}.{name}: {n:,} rows")
+    full = t(name)
+    (df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full))
+    n = spark.table(full).count()
+    print(f"wrote {full}: {n:,} rows")
 
 
-locations = spark.table(f"{CATALOG}.{SCHEMA}.bronze_locations")
+locations = spark.table(t("bronze_locations"))
 
 # COMMAND ----------
 
@@ -49,8 +57,8 @@ locations = spark.table(f"{CATALOG}.{SCHEMA}.bronze_locations")
 # COMMAND ----------
 
 xrf = (
-    spark.table(f"{CATALOG}.{SCHEMA}.bronze_xrf_geochem")
-    .unionByName(spark.table(f"{CATALOG}.{SCHEMA}.bronze_xrf_soil"))
+    spark.table(t("bronze_xrf_geochem"))
+    .unionByName(spark.table(t("bronze_xrf_soil")))
 )
 for el in XRF_ELEMENTS:
     xrf = xrf.withColumn(
@@ -70,7 +78,7 @@ write(silver_xrf, "silver_xrf")
 # COMMAND ----------
 
 silver_mscl = (
-    spark.table(f"{CATALOG}.{SCHEMA}.bronze_mscl")
+    spark.table(t("bronze_mscl"))
     .withColumn("site", site_from_core())
     .join(locations, F.col("site") == locations["core_id"], "left")
     .drop(locations["core_id"])
@@ -85,7 +93,7 @@ write(silver_mscl, "silver_mscl")
 
 display(spark.sql(f"""
   SELECT mode, COUNT(*) AS n_rows, COUNT(DISTINCT core_id) AS n_cores
-  FROM {CATALOG}.{SCHEMA}.silver_xrf
+  FROM {t('silver_xrf')}
   GROUP BY mode
   ORDER BY mode
 """))
@@ -96,7 +104,7 @@ display(spark.sql(f"""
   SELECT site, mode, COUNT(*) AS n_samples,
          AVG(latitude) AS lat, AVG(longitude) AS lon,
          AVG(water_depth_m) AS water_depth
-  FROM {CATALOG}.{SCHEMA}.silver_xrf
+  FROM {t('silver_xrf')}
   GROUP BY site, mode
   ORDER BY site, mode
 """))
