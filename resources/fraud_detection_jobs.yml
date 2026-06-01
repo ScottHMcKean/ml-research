@@ -1,0 +1,45 @@
+resources:
+  jobs:
+    fraud_detection_pipeline:
+      name: "[${bundle.target}] Fraud Detection — Train & Register"
+      job_clusters:
+        - job_cluster_key: fraud_ml_cluster
+          new_cluster:
+            spark_version: "17.3.x-cpu-ml-scala2.13"
+            node_type_id: "Standard_D8ds_v5"
+            num_workers: 2
+            data_security_mode: SINGLE_USER
+      tasks:
+        - task_key: data_prep
+          notebook_task:
+            notebook_path: ../notebooks/fraud_detection/00_data_prep.py
+          job_cluster_key: fraud_ml_cluster
+
+        - task_key: train_and_register
+          depends_on:
+            - task_key: data_prep
+          notebook_task:
+            notebook_path: ../notebooks/fraud_detection/01_train_xgboost.py
+          job_cluster_key: fraud_ml_cluster
+
+        - task_key: batch_inference
+          depends_on:
+            - task_key: train_and_register
+          notebook_task:
+            notebook_path: ../notebooks/fraud_detection/02_batch_inference.py
+          job_cluster_key: fraud_ml_cluster
+
+    fraud_detection_streaming:
+      name: "[${bundle.target}] Fraud Detection — Live Streaming Inference"
+      # Continuous job: scores the live transaction stream until stopped.
+      continuous:
+        pause_status: PAUSED
+      tasks:
+        - task_key: streaming_inference
+          notebook_task:
+            notebook_path: ../notebooks/fraud_detection/04_streaming_inference.py
+          new_cluster:
+            spark_version: "17.3.x-cpu-ml-scala2.13"
+            node_type_id: "Standard_D8ds_v5"
+            num_workers: 1
+            data_security_mode: SINGLE_USER
