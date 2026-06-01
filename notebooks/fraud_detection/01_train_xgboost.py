@@ -17,12 +17,24 @@
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Load a custom package from a `.whl` file
+# MAGIC Likely the fastest legacy-compatibility pattern — CI/CD ships the `.whl` to a
+# MAGIC Volume, then it's available to any notebook/repo with Unity Catalog access.
+
+# COMMAND ----------
+
+# MAGIC %uv pip install /Volumes/shm/ml/whl/mlflow_lens-0.2.0-py3-none-any.whl
+
+# COMMAND ----------
+
 import mlflow
 import mlflow.xgboost
 import numpy as np
 import xgboost as xgb
 from mlflow.models import infer_signature
 from mlflow.tracking import MlflowClient
+from mlflow_lens.classifier import roc_auc, confusion_matrix
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, precision_score, recall_score
 
 CATALOG = "shm"
@@ -123,6 +135,10 @@ for name, cfg in EXPERIMENTS.items():
             early_stopping_rounds=30, verbose_eval=False,
         )
         metrics = evaluate(booster, dvalid, y_valid)
+
+        # Log a ROC curve via the custom mlflow_lens package (.whl loaded above)
+        y_proba = booster.predict(xgb.DMatrix(X_valid))
+        roc_auc.from_scores(y_valid, y_proba, log=True)
 
         mlflow.log_params(cfg["params"])
         mlflow.log_param("num_boost_round", cfg["num_boost_round"])
