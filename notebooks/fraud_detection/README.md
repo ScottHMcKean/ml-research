@@ -37,9 +37,14 @@ same `models:/shm.ml.fraud_xgboost@champion` URI.
   `..._profile_metrics` + `..._drift_metrics` tables and a dashboard, tracking score
   distribution and alert-rate drift across refreshes.
 
-> The streaming notebook runs for a bounded `RUN_SECONDS` window by default (clean, safe
-> demo). Set `RUN_SECONDS = None` for an always-on stream, and use the continuous job in
-> `resources/fraud_detection_jobs.yml` to keep it running.
+> The streaming notebook has two modes via `STREAM_MODE`:
+> - `serverless` (default) — stages transactions to a Delta landing table and scores
+>   them with `Trigger.availableNow`. Runs on **serverless/shared** compute, easiest to
+>   demo (click Run All).
+> - `classic` — Spark `rate` source with a continuous `processingTime` trigger for an
+>   always-on live stream. Needs a classic **Single-User** ML cluster (serverless/shared
+>   compute can't run continuous triggers). Bounded by `RUN_SECONDS`; set to `None` for
+>   always-on, and use the continuous job in `resources/fraud_detection_jobs.yml`.
 
 ## Run it
 

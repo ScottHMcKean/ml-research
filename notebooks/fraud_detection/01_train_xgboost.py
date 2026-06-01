@@ -128,7 +128,9 @@ for name, cfg in EXPERIMENTS.items():
         mlflow.log_param("num_boost_round", cfg["num_boost_round"])
         mlflow.log_param("best_iteration", booster.best_iteration)
         mlflow.log_metrics(metrics)
-        mlflow.xgboost.log_model(booster, artifact_path="model")
+        example = X_valid.head(5)
+        sig = infer_signature(example, booster.predict(xgb.DMatrix(example)))
+        mlflow.xgboost.log_model(booster, artifact_path="model", signature=sig, input_example=example)
 
         runs[name] = {"run_id": run.info.run_id, "booster": booster, "metrics": metrics}
         print(f"{name:18s}  AUC={metrics['auc']:.4f}  PR-AUC={metrics['pr_auc']:.4f}  "
