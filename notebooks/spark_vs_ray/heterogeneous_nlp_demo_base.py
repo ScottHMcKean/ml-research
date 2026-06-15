@@ -367,9 +367,33 @@ torch.cuda.empty_cache()
 
 import ray
 
-# Single-node demo: Ray runs locally on the driver. On a multi-node cluster
-# you'd swap this for `ray.util.spark.setup_ray_cluster(max_worker_nodes=N,
-# num_gpus_worker_node=1)` to attach Ray to the Spark workers.
+# Single-node demo: Ray runs locally on the driver, which is all this
+# comparison needs. Scaling onto the Spark workers is where the sharp edges
+# live, so spell the correct flow out rather than hand-wave it:
+#
+#   from ray.util.spark import setup_ray_cluster, shutdown_ray_cluster
+#
+#   ray.shutdown()                 # drop any local/stale driver context first
+#   try:
+#       shutdown_ray_cluster()     # tear down a prior Ray-on-Spark cluster
+#   except Exception:
+#       pass
+#
+#   conn, _ = setup_ray_cluster(
+#       min_worker_nodes=N, max_worker_nodes=N,   # fixed size — from_spark()
+#                                                 # does NOT support autoscaling
+#       num_cpus_worker_node=8,
+#       num_gpus_worker_node=1,                   # Ray pins GPU work to GPU nodes
+#       collect_log_to_path="/Volumes/<cat>/<schema>/<vol>/ray_logs",
+#   )                              # leave head-node compute at 0 in hybrid mode —
+#                                  # the driver's Spark will starve/kill Ray otherwise
+#   ray.init(address=conn, ignore_reinit_error=True)   # CONNECT to that cluster.
+#                                  # A bare ray.init() here starts a *separate*
+#                                  # context, so actors land elsewhere and you get
+#                                  # "Can't find actor ... it's from a different
+#                                  # cluster" / EADDRINUSE worker deaths.
+#   ... run the pipeline ...
+#   shutdown_ray_cluster()         # required, or collected logs never copy out
 if ray.is_initialized():
     ray.shutdown()
 ray.init(num_cpus=4, num_gpus=1)

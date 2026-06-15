@@ -426,9 +426,33 @@ torch.cuda.empty_cache()
 
 import ray
 
-# Single-node demo: Ray runs locally on the driver. On a multi-node cluster
-# you'd swap this for `ray.util.spark.setup_ray_cluster(max_worker_nodes=N,
-# num_gpus_worker_node=1)` to attach Ray to the Spark workers.
+# Single-node demo: Ray runs locally on the driver, which is all this
+# comparison needs. Scaling onto the Spark workers is where the sharp edges
+# live, so spell the correct flow out rather than hand-wave it:
+#
+#   from ray.util.spark import setup_ray_cluster, shutdown_ray_cluster
+#
+#   ray.shutdown()                 # drop any local/stale driver context first
+#   try:
+#       shutdown_ray_cluster()     # tear down a prior Ray-on-Spark cluster
+#   except Exception:
+#       pass
+#
+#   conn, _ = setup_ray_cluster(
+#       min_worker_nodes=N, max_worker_nodes=N,   # fixed size — from_spark()
+#                                                 # does NOT support autoscaling
+#       num_cpus_worker_node=8,
+#       num_gpus_worker_node=1,                   # Ray pins GPU work to GPU nodes
+#       collect_log_to_path="/Volumes/<cat>/<schema>/<vol>/ray_logs",
+#   )                              # leave head-node compute at 0 in hybrid mode —
+#                                  # the driver's Spark will starve/kill Ray otherwise
+#   ray.init(address=conn, ignore_reinit_error=True)   # CONNECT to that cluster.
+#                                  # A bare ray.init() here starts a *separate*
+#                                  # context, so actors land elsewhere and you get
+#                                  # "Can't find actor ... it's from a different
+#                                  # cluster" / EADDRINUSE worker deaths.
+#   ... run the pipeline ...
+#   shutdown_ray_cluster()         # required, or collected logs never copy out
 if ray.is_initialized():
     ray.shutdown()
 ray.init(num_cpus=4, num_gpus=1)
@@ -655,17 +679,59 @@ plt.show()
 # MAGIC ```
 # MAGIC
 # MAGIC ```python
-# MAGIC from ray.util.spark import setup_ray_cluster
-# MAGIC setup_ray_cluster(
-# MAGIC     max_worker_nodes=12,
+# MAGIC from ray.util.spark import setup_ray_cluster, shutdown_ray_cluster
+# MAGIC
+# MAGIC ray.shutdown()                      # clear any stale driver context
+# MAGIC try:
+# MAGIC     shutdown_ray_cluster()          # and any prior Ray-on-Spark cluster
+# MAGIC except Exception:
+# MAGIC     pass
+# MAGIC
+# MAGIC conn, _ = setup_ray_cluster(
+# MAGIC     min_worker_nodes=12, max_worker_nodes=12,  # fixed: from_spark() can't autoscale
 # MAGIC     num_cpus_worker_node=8,
-# MAGIC     num_gpus_worker_node=1,   # Ray only schedules GPU work on GPU nodes
-# MAGIC )
+# MAGIC     num_gpus_worker_node=1,         # Ray only schedules GPU work on GPU nodes
+# MAGIC     collect_log_to_path="/Volumes/<cat>/<schema>/<vol>/ray_logs",
+# MAGIC )                                   # no head-node compute in hybrid mode
+# MAGIC ray.init(address=conn, ignore_reinit_error=True)  # connect — never a bare ray.init()
+# MAGIC # ... run the pipeline, then:
+# MAGIC shutdown_ray_cluster()              # or the collected logs never copy out
 # MAGIC ```
 # MAGIC
 # MAGIC The pipeline code is unchanged. `.map_batches(RayStage2GPU, num_gpus=1)`
 # MAGIC schedules across the 4-node GPU pool; `ray_stage1` and `ray_stage3`
 # MAGIC land on the 8-node CPU pool. Ray Data streams batches between them.
+# MAGIC
+# MAGIC ### Feeding Spark data into Ray at scale
+# MAGIC
+# MAGIC This demo does `spark.table(...).toPandas()` → `ray.data.from_pandas(...)`.
+# MAGIC At 10k rows that's fine, but `toPandas()` collects the whole table onto
+# MAGIC the driver — it won't survive a real workload. Two scale-out swaps, in
+# MAGIC increasing order of friction:
+# MAGIC
+# MAGIC 1. **Isolated (recommended): Spark writes Delta/Parquet, Ray reads it.**
+# MAGIC    Spark `.write` the prepared subset, then `ray.data.read_parquet(path)`
+# MAGIC    in the Ray stage. No live coupling between the two engines — this is
+# MAGIC    the simplest pattern and fits most workloads.
+# MAGIC 2. **Hybrid: `ray.data.from_spark(df)`** keeps it in one job but is the
+# MAGIC    sharpest edge. It requires, at the cluster level:
+# MAGIC    - `spark.databricks.pyspark.dataFrameChunk.enabled true`
+# MAGIC    - `spark.task.resource.gpu.amount 0` (don't let Spark hold the GPUs Ray needs)
+# MAGIC    - shrink Spark's footprint so Ray has room — e.g. `spark.executor.memory 1g`,
+# MAGIC      `spark.driver.memory 1g`; default reservations can starve Ray hard
+# MAGIC
+# MAGIC    It also does **not** support autoscaling Ray-on-Spark clusters, and
+# MAGIC    Databricks-patch / Ray-version skew tends to surface right here
+# MAGIC    (`BlockMetadata(... schema=)`, `get_read_tasks(... per_task_row_limit=)`).
+# MAGIC    Pin a known-good Ray (e.g. 2.35.0) on the affected runtime.
+# MAGIC
+# MAGIC Whichever you pick, keep worker functions pure Python (pandas in →
+# MAGIC inference → pandas out). `JVM wasn't initialised` / pyspark UDF warnings
+# MAGIC inside a Ray worker mean it's reaching back into Spark — pull that out.
+# MAGIC And make it boring before fast: 1 GPU actor per physical GPU with
+# MAGIC `num_gpus=1` (as stage 2 already does) is the stable baseline; fractional
+# MAGIC GPU packing (`num_gpus=1/k`, several models per device) is an
+# MAGIC optimization to reach for only once the single-actor version runs clean.
 # MAGIC
 # MAGIC ### Custom resource tags
 # MAGIC
