@@ -1,5 +1,12 @@
 # Databricks notebook source
-# MAGIC %pip install ray==2.22.0
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# dependencies = [
+#   "ray",
+# ]
+# ///
+# MAGIC %pip install ray
 
 # COMMAND ----------
 
@@ -10,10 +17,9 @@ dbutils.library.restartPython()
 from ray.util.spark import setup_ray_cluster, shutdown_ray_cluster
 
 setup_ray_cluster(
-  num_worker_nodes=2,
-  num_cpus_worker_node=4,
-  num_gpus_per_node=1,
-  collect_log_to_path="/dbfs/Users/sriharsha.jana@databricks.com/ray_collected_logs"
+  num_cpus_head_node=4,
+  num_worker_nodes=0,
+  num_gpus_per_node=0
 )
 
 # COMMAND ----------
@@ -28,7 +34,7 @@ import random
 import time
 from fractions import Fraction
 
-@ray.remote
+@ray.remote(cpus=10, gpus=0.5)
 def pi4_sample(sample_count):
     """pi4_sample runs sample_count experiments, and returns the
     fraction of time it was inside the circle.
@@ -61,7 +67,7 @@ results = []
 for _ in range(BATCHES):
     results.append(pi4_sample.remote(sample_count = SAMPLE_COUNT))
 output = ray.get(results)
- 
+
 pi = sum(output)*4/len(output)
 print(float(pi))
 

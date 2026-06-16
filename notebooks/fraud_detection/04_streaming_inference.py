@@ -1,5 +1,8 @@
 # Databricks notebook source
-
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # Fraud Detection — Structured Streaming Inference (Live Data)
 # MAGIC The third **inference** pattern, and the headline of the demo: scoring a stream
@@ -44,7 +47,7 @@ ALERT_THRESHOLD = 0.50
 STREAM_MODE = "serverless"   # "serverless" (availableNow) or "classic" (continuous)
 ROWS_PER_SECOND = 2          # classic mode: ~one new transaction every 0.5s
 RUN_SECONDS = 90             # classic mode: bounded window, then stop (None = forever)
-N_LANDING = 3000             # serverless mode: synthetic transactions staged per run
+N_LANDING = 100             # serverless mode: synthetic transactions staged per run
 # --------------------------------------------------------------------------
 
 mlflow.set_registry_uri("databricks-uc")

@@ -1,5 +1,9 @@
 # Databricks notebook source
-
+# /// script
+# [tool.databricks.environment]
+# base_environment = "databricks_ml_v5"
+# environment_version = "1"
+# ///
 # MAGIC %md
 # MAGIC # Fraud Detection — Training & Experimentation with MLflow + XGBoost
 # MAGIC This is the **training → experimentation → registry** stage.
@@ -14,6 +18,7 @@
 # MAGIC fraud), wrap its booster in a `FraudScorer` pyfunc that returns a calibrated
 # MAGIC **fraud probability**, and register it to Unity Catalog as `shm.ml.fraud_xgboost`
 # MAGIC with a `champion` alias.
+# MAGIC
 
 # COMMAND ----------
 
@@ -25,6 +30,7 @@
 # COMMAND ----------
 
 # MAGIC %uv pip install /Volumes/shm/ml/whl/mlflow_lens-0.2.0-py3-none-any.whl
+# MAGIC %restart_python
 
 # COMMAND ----------
 
