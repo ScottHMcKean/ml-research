@@ -1,0 +1,93 @@
+# =============================================================================
+# ML on Databricks — Hands-On Workshop — Databricks Asset Bundle
+# Ships two jobs (data generation + streaming) and the three lab notebooks.
+#
+# Auth (host + profile) is read from the CLI environment, NOT from this file.
+# Set DATABRICKS_CONFIG_PROFILE (or --profile) first.
+#   export DATABRICKS_CONFIG_PROFILE=ml-workshop
+#   databricks bundle validate
+#   databricks bundle deploy
+#   databricks bundle run ml_workshop_data_generation   # once, builds the tables
+#   databricks bundle run ml_workshop_streaming          # before Lab 2
+# =============================================================================
+
+bundle:
+  name: ml-workshop
+
+variables:
+  catalog:
+    description: Unity Catalog catalog for all workshop assets. Override per attendee with --var catalog=<name>.
+    default: ml_workshop
+  sales_schema:
+    description: Schema for sales / depletions tables (Lab 1 recommender + Lab 3 forecasting)
+    default: sales
+  brewery_schema:
+    description: Schema for brewery OT telemetry tables (Lab 2 Auto Loader)
+    default: brewery
+
+resources:
+  jobs:
+
+    # --- Data generation: run ONCE to populate the workshop tables ---------
+    ml_workshop_data_generation:
+      name: "[ML Workshop] Generate synthetic data (run once)"
+      tags:
+        project: ml-workshop
+      tasks:
+        - task_key: generate_sales
+          notebook_task:
+            notebook_path: ./01_generate_sales.py
+            base_parameters:
+              catalog: ${var.catalog}
+              sales_schema: ${var.sales_schema}
+        - task_key: generate_brewery_history
+          # ~15.6M readings — runs after sales so a cheap failure surfaces first.
+          depends_on:
+            - task_key: generate_sales
+          notebook_task:
+            notebook_path: ./02_generate_brewery_history.py
+            base_parameters:
+              catalog: ${var.catalog}
+              brewery_schema: ${var.brewery_schema}
+      queue:
+        enabled: true
+
+    # --- Streaming: continuously drops Sparkplug-B JSON micro-batches on the
+    #     Volume (the Auto Loader source for Lab 2). START IT and leave it running
+    #     through Lab 2, then cancel the run. Runs on a small single-node CLASSIC
+    #     cluster (continuous producer loop isn't a serverless-notebook fit).
+    #     node_type_id below is Azure; change it for AWS (e.g. m5d.large) / GCP.
+    ml_workshop_streaming:
+      name: "[ML Workshop] Stream telemetry to the landing volume (continuous)"
+      tags:
+        project: ml-workshop
+      timeout_seconds: 7200          # safety cap: auto-stop after 2h if forgotten
+      tasks:
+        - task_key: write_to_volume
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "Standard_DS3_v2"
+            num_workers: 0
+            # Single-user mode so Unity Catalog is enabled (the notebook reads/writes UC).
+            data_security_mode: SINGLE_USER
+            single_user_name: ${workspace.current_user.userName}
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode
+          notebook_task:
+            notebook_path: ./write_to_volume.py
+            base_parameters:
+              catalog: ${var.catalog}
+              brewery_schema: ${var.brewery_schema}
+
+targets:
+  dev:
+    default: true
+    mode: development
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
