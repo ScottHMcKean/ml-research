@@ -29,7 +29,7 @@
 
 # COMMAND ----------
 
-# MAGIC %run ./00_setup
+# MAGIC %run ./src/00_setup
 
 # COMMAND ----------
 

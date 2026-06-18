@@ -34,7 +34,21 @@
 
 # COMMAND ----------
 
-# MAGIC %run ./00_setup
+# MAGIC %md
+# MAGIC These two libraries aren't in the serverless base environment, so install them first.
+# MAGIC (On an ML-runtime cluster they're already present — this is a quick no-op.)
+
+# COMMAND ----------
+
+# MAGIC %pip install -q lightgbm statsmodels
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
+# MAGIC %run ./src/00_setup
 
 # COMMAND ----------
 
@@ -280,7 +294,14 @@ FEATURES = [c for c in feat.columns if c.startswith("lag_")] + ["month"]
 
 f_train, f_test = feat.iloc[:-HOLDOUT], feat.iloc[-HOLDOUT:]
 
-mlflow.lightgbm.autolog()
+from mlflow.models import infer_signature
+
+# Register models to Unity Catalog. autolog logs params/metrics; we log + register the
+# model ourselves (with a signature) so we can govern, version, and reload it.
+mlflow.set_registry_uri("databricks-uc")
+mlflow.lightgbm.autolog(log_models=False)
+UC_FORECAST_MODEL = f"{CATALOG}.{SALES}.demand_lightgbm"
+
 with mlflow.start_run(run_name="lightgbm"):
     dtrain = lgb.Dataset(f_train[FEATURES], label=f_train["y"])
     params = dict(objective="regression", learning_rate=0.05, num_leaves=15,
@@ -289,7 +310,16 @@ with mlflow.start_run(run_name="lightgbm"):
     lgb_pred = booster.predict(f_test[FEATURES])
     lgb_mape = mean_absolute_percentage_error(f_test["y"], lgb_pred)
     mlflow.log_metric("holdout_mape", float(lgb_mape))
-    print(f"LightGBM holdout MAPE: {lgb_mape:.3f}  (autolog logged booster + params)")
+
+    sig = infer_signature(f_train[FEATURES], booster.predict(f_train[FEATURES]))
+    lgb_info = mlflow.lightgbm.log_model(
+        booster, artifact_path="model", signature=sig,
+        input_example=f_train[FEATURES].head(3), registered_model_name=UC_FORECAST_MODEL)
+    print(f"LightGBM holdout MAPE: {lgb_mape:.3f}  ·  "
+          f"registered {UC_FORECAST_MODEL} v{lgb_info.registered_model_version}")
+
+mlflow.MlflowClient().set_registered_model_alias(
+    UC_FORECAST_MODEL, "champion", lgb_info.registered_model_version)
 
 display(spark.createDataFrame(
     pd.DataFrame({"month": f_test["ds"], "actual": f_test["y"].values, "lightgbm": lgb_pred})))
@@ -342,10 +372,33 @@ display(spark.createDataFrame(board))
 
 # COMMAND ----------
 
+# MAGIC %md-sandbox
+# MAGIC ## Step 7 — Register → test: load the LightGBM model from Unity Catalog
+# MAGIC
+# MAGIC <div style="background:#F1F1F1; border-left:5px solid #1B5161; padding:15px; margin:15px 0;">
+# MAGIC   Same loop as Lab 1: the model is now a <strong>governed, versioned object in Unity Catalog</strong>
+# MAGIC   (registered in Step 5 under the <code>@champion</code> alias). We <strong>load it back</strong> — as
+# MAGIC   any downstream job would — and confirm it reproduces the forecast. From here it can be served behind
+# MAGIC   an endpoint or refreshed by a scheduled job.
+# MAGIC </div>
+
+# COMMAND ----------
+
+# DBTITLE 1,Step 7: Load the registered model and confirm it reproduces the forecast
+loaded = mlflow.lightgbm.load_model(f"models:/{UC_FORECAST_MODEL}@champion")
+reloaded_pred = loaded.predict(f_test[FEATURES])
+print(f"Loaded {UC_FORECAST_MODEL}@champion — predictions match the in-notebook model:",
+      bool(np.allclose(reloaded_pred, lgb_pred)))
+display(spark.createDataFrame(
+    pd.DataFrame({"month": f_test["ds"], "actual": f_test["y"].values,
+                  "reloaded_lightgbm": reloaded_pred})))
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## ✅ Wrap-up
 # MAGIC One forecasting workflow at **three levels of effort** — `ai_forecast()` for speed, Holt-Winters and
-# MAGIC LightGBM for accuracy — with **`mlflow.autolog` capturing every run for free**, and you drove it through
-# MAGIC **Genie Code, Databricks MCP, and Claude Code skills** instead of hand-typing. The governed UC function
-# MAGIC means whichever model wins, the business user's Genie question stays the same. Fast on-ramp, real depth
-# MAGIC when it pays, one governed surface from notebook to boardroom.
+# MAGIC LightGBM for accuracy — with **`mlflow.autolog` capturing every run for free**. The winning model is
+# MAGIC **registered to Unity Catalog and loaded back to test it** (the same autolog → register → test loop as
+# MAGIC Lab 1), and the governed `ai_forecast` UC function means whichever model wins, the business user's Genie
+# MAGIC question stays the same. You drove it through **Genie Code, Databricks MCP, and Claude Code skills**.
