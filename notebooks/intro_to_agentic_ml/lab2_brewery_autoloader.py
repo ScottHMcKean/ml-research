@@ -79,6 +79,8 @@ display(spark.sql(f"""
 # COMMAND ----------
 
 # DBTITLE 1,Step 2: Confirm the streaming job is landing files (it's continuous — counts grow)
+from pyspark.sql.functions import col, from_unixtime
+
 try:
     incoming = dbutils.fs.ls(f"{VOLUME_PATH}/incoming")
 except Exception:
@@ -89,7 +91,9 @@ if not incoming:
         "  databricks bundle run ml_workshop_streaming --no-wait")
 print(f"{len(incoming)} Sparkplug-B JSON micro-batches landed so far in {VOLUME_PATH}/incoming "
       "(this keeps growing while the job runs)")
-display(spark.sql(f"LIST '{VOLUME_PATH}/incoming/'"))
+df = spark.createDataFrame(incoming)
+df = df.withColumn("modificationTime_iso", from_unixtime(col("modificationTime")/1000))
+display(df)
 
 # COMMAND ----------
 
@@ -313,7 +317,6 @@ chiller = spark.sql(f"""
   SELECT reading_ts, value
   FROM {BREW_FACT_READINGS}
   WHERE tag_id='GLY.GLY01.RETURN_TEMP'
-    AND reading_ts BETWEEN '2025-06-27 06:00' AND '2025-06-28 06:00'
   ORDER BY reading_ts
 """)
 display(chiller)   # render as a line chart: reading_ts (x) vs value (y)
