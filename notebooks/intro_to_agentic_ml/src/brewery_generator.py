@@ -19,9 +19,12 @@
 #     conductivity, utilities).
 #   * 5-minute analytics cadence. (Real historians keep 1-sec raw; downstream
 #     analytics stores rollups — this is that rollup tier.)
-#   * Value model = baseline + diurnal (AZ ambient) + mean-reverting drift +
-#     Gaussian noise, clipped to physical bounds. Labeled anomaly windows are
-#     injected on top so Lab 2 has ground truth for range-based evaluation.
+#   * Value model = bounded RANDOM WALK around the band midpoint (the dominant
+#     dynamic) + small diurnal (AZ ambient) component + Gaussian measurement noise,
+#     clipped to physical bounds. The walk has light mean-reversion so it wanders
+#     like a real random walk but stays physically plausible. Labeled anomaly
+#     windows (spike/ramp/drift/stuck) are injected on top so Lab 2 and the served
+#     anomaly model have ground truth and a clearly-separable signal to detect.
 # -----------------------------------------------------------------------------
 
 import numpy as np
@@ -225,13 +228,21 @@ def _az_ambient_f(dt_index):
     diurnal = 12 * np.cos(2 * np.pi * (hod - 16) / 24.0)         # peak ~4pm
     return annual + diurnal
 
-def _ou_drift(n_hours, sigma, seed):
-    """Mean-reverting (Ornstein-Uhlenbeck) drift at hourly resolution."""
+def _bounded_random_walk(n, step_sigma, mid, seed, reversion=0.015):
+    """Bounded random walk at the analytics cadence: each step adds Gaussian noise
+    to the previous value (a true random walk), with light mean-reversion toward
+    `mid` so the series wanders but stays physically plausible instead of drifting
+    to infinity. Stationary std ≈ step_sigma / sqrt(2*reversion). Vectorised-ish
+    cumulative form would lose the reversion, so we loop — n is per-tag (≤ a few
+    hundred k) and this runs in well under a second."""
     rng = np.random.default_rng(seed)
-    d = np.zeros(n_hours)
-    for i in range(1, n_hours):
-        d[i] = d[i - 1] * 0.985 + rng.normal(0, sigma)
-    return d
+    x = np.empty(n, dtype="float64")
+    x[0] = mid
+    steps = rng.normal(0.0, step_sigma, n)
+    keep = 1.0 - reversion
+    for i in range(1, n):
+        x[i] = keep * x[i - 1] + reversion * mid + steps[i]
+    return x
 
 def generate_tag_series(tag, dt_index, ambient_f=None, seed=None):
     """Return (values float64[], quality_code str[]) for one tag over dt_index
@@ -247,8 +258,14 @@ def generate_tag_series(tag, dt_index, ambient_f=None, seed=None):
     if ambient_f is None:
         ambient_f = _az_ambient_f(dt_index)
 
-    # baseline + noise
-    vals = np.full(n, mid, dtype="float64")
+    # ---- random-walk baseline (dominant dynamic) + measurement noise ----
+    # Each tag wanders as a bounded random walk around the middle of its normal
+    # band; drift_frac scales the per-step size. Small iid noise on top is the
+    # sensor's own measurement jitter. (Constants tuned so normal data mostly
+    # stays in-band and injected anomalies remain clearly separable — verified on
+    # the first real run.)
+    step_sigma = band * tag["drift_frac"] * 0.5
+    vals = _bounded_random_walk(n, step_sigma, mid, seed + 7, reversion=0.015)
     vals += rng.normal(0, band * tag["noise_frac"], n)
 
     # diurnal component
@@ -259,14 +276,6 @@ def generate_tag_series(tag, dt_index, ambient_f=None, seed=None):
         else:
             hod = (dt_index.hour + dt_index.minute / 60.0).to_numpy()
             vals += np.cos(2 * np.pi * (hod - 16) / 24.0) * band * tag["diurnal_frac"]
-
-    # mean-reverting drift (generated hourly then interpolated to cadence)
-    if tag["drift_frac"] > 0:
-        n_hours = int(np.ceil((dt_index[-1] - dt_index[0]).total_seconds() / 3600)) + 2
-        d_hourly = _ou_drift(n_hours, band * tag["drift_frac"], seed + 7)
-        hours_axis = np.arange(n_hours)
-        elapsed_h = (dt_index - dt_index[0]).total_seconds().to_numpy() / 3600.0
-        vals += np.interp(elapsed_h, hours_axis, d_hourly)
 
     # ---- inject scheduled anomalies ----
     anomaly_mask = np.zeros(n, dtype=bool)
@@ -313,3 +322,4 @@ def generate_tag_series(tag, dt_index, ambient_f=None, seed=None):
 def build_timestamp_index(start_dt, end_dt):
     """5-minute DatetimeIndex over [start_dt, end_dt)."""
     return pd.date_range(start=start_dt, end=end_dt, freq=f"{CADENCE_MIN}min", inclusive="left")
+

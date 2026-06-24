@@ -32,8 +32,10 @@ import pandas as pd
 from datetime import datetime
 from pyspark.sql import types as T
 
-# History window — matches the sales model (Jan 1 2024 -> Jun 22 2026).
-HIST_START = datetime(2024, 1, 1, 0, 0)
+# History window — short, demo-sized window ending at 'now'. ~52 days keeps the
+# dataset small (~0.9M rows) so the gen job runs fast, while still spanning the
+# 2026-05-19 chiller-fault anomaly used for detection/eval and model training.
+HIST_START = datetime(2026, 5, 1, 0, 0)
 HIST_END   = datetime(2026, 6, 22, 0, 0)
 
 DT_INDEX = build_timestamp_index(HIST_START, HIST_END)   # 5-min cadence
@@ -137,14 +139,14 @@ import pyspark.sql.functions as F
 
 checks = []
 
-# 1. Row count is in the expected ballpark (~15.6M)
+# 1. Row count is in the expected ballpark (~0.9M for the ~52-day demo window)
 n_readings = spark.table(BREW_FACT_READINGS).count()
-checks.append(("row_count ~15.6M", 14_000_000 <= n_readings <= 17_000_000, f"{n_readings:,}"))
+checks.append(("row_count ~0.9M", 600_000 <= n_readings <= 1_200_000, f"{n_readings:,}"))
 
 # 2. Time span matches the requested window
 span = spark.table(BREW_FACT_READINGS).agg(
     F.min("reading_ts").alias("lo"), F.max("reading_ts").alias("hi")).first()
-checks.append(("span starts 2024-01-01", str(span["lo"]).startswith("2024-01-01"), str(span["lo"])))
+checks.append(("span starts 2026-05-01", str(span["lo"]).startswith("2026-05-01"), str(span["lo"])))
 checks.append(("span ends <= 2026-06-22", str(span["hi"]) <= "2026-06-22 00:00:00", str(span["hi"])))
 
 # 3. Quality-code mix: mostly Good but a realistic minority non-Good
@@ -157,14 +159,15 @@ checks.append(("Good fraction 0.94-0.999", 0.94 <= good_frac <= 0.999, f"{good_f
 n_tags_with_data = spark.table(BREW_FACT_READINGS).select("tag_id").distinct().count()
 checks.append(("all tags have data", n_tags_with_data == N_TAGS, f"{n_tags_with_data}/{N_TAGS}"))
 
-# 5. Anomaly windows actually breach: FV-003 runaway exceeds its crit threshold
-fv3_crit = TAG_BY_ID["FMC.FV-003.TEMP_WORT"]["crit_threshold"]
-fv3_max = (spark.table(BREW_FACT_READINGS)
-           .where("tag_id = 'FMC.FV-003.TEMP_WORT'")
-           .where("reading_ts between '2024-07-18 02:00' and '2024-07-19 08:00'")
+# 5. Anomaly windows actually breach: the 2026-05-19 chiller fault drives glycol
+#    return temp above its crit threshold (this is the in-window demo anomaly).
+gly_crit = TAG_BY_ID["GLY.GLY01.RETURN_TEMP"]["crit_threshold"]
+gly_max = (spark.table(BREW_FACT_READINGS)
+           .where("tag_id = 'GLY.GLY01.RETURN_TEMP'")
+           .where("reading_ts between '2026-05-19 12:00' and '2026-05-20 02:00'")
            .agg(F.max("value").alias("m")).first()["m"])
-checks.append(("FV-003 runaway breaches crit", fv3_max is not None and fv3_max > fv3_crit,
-               f"max={fv3_max} crit={fv3_crit}"))
+checks.append(("chiller fault breaches crit", gly_max is not None and gly_max > gly_crit,
+               f"max={gly_max} crit={gly_crit}"))
 
 # 6. Labels reference real tags
 orphan = (spark.table(BREW_FACT_ANOMALY_LABELS).select("tag_id").distinct()
@@ -178,3 +181,4 @@ for name, ok, detail in checks:
     all_ok = all_ok and ok
 assert all_ok, "One or more brewery-data invariants failed — inspect output above."
 print("\nAll brewery-history invariants passed.")
+
