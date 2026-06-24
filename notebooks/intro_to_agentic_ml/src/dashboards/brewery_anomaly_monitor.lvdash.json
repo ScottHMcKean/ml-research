@@ -1,0 +1,433 @@
+{
+  "datasets": [
+    {
+      "name": "gold_anomalies",
+      "displayName": "Live Gold Anomalies",
+      "queryLines": [
+        "SELECT\n",
+        "  *\n",
+        "FROM\n",
+        "  ml_workshop.brewery.live_gold_anomalies"
+      ]
+    },
+    {
+      "name": "chiller_drift",
+      "displayName": "Glycol Chiller Return Temp",
+      "queryLines": [
+        "SELECT\n",
+        "  reading_ts,\n",
+        "  value\n",
+        "FROM\n",
+        "  ml_workshop.brewery.live_silver_readings\n",
+        "WHERE\n",
+        "  tag_id = 'GLY.GLY01.RETURN_TEMP'\n",
+        "ORDER BY\n",
+        "  reading_ts"
+      ]
+    },
+    {
+      "name": "recent_anomalies",
+      "displayName": "Recent Anomalies (Top 20)",
+      "queryLines": [
+        "SELECT\n",
+        "  reading_ts,\n",
+        "  tag_id,\n",
+        "  asset_id,\n",
+        "  area,\n",
+        "  value,\n",
+        "  crit_threshold,\n",
+        "  zscore,\n",
+        "  detect_reason\n",
+        "FROM\n",
+        "  ml_workshop.brewery.live_gold_anomalies\n",
+        "ORDER BY\n",
+        "  reading_ts DESC\n",
+        "LIMIT 20"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "5799bb86",
+      "displayName": "Page 1",
+      "layout": [
+        {
+          "widget": {
+            "name": "anomaly_counter",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "gold_anomalies",
+                  "fields": [
+                    {
+                      "name": "reading_ts",
+                      "expression": "`reading_ts`"
+                    },
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(`*`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "orders": [
+                    {
+                      "direction": "DESC",
+                      "expression": "`reading_ts`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Total Anomalies Detected",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(*)"
+                },
+                "period": {
+                  "fieldName": "reading_ts"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 3,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "anomalies_by_hour",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "gold_anomalies",
+                  "fields": [
+                    {
+                      "name": "hourly(reading_ts)",
+                      "expression": "DATE_TRUNC(\"HOUR\", `reading_ts`)"
+                    },
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(`*`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Anomaly Count by Hour",
+                "showTitle": true
+              },
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "hourly(reading_ts)",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "count(*)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 0,
+            "width": 9,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "anomalies_by_area",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "gold_anomalies",
+                  "fields": [
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(`*`)"
+                    },
+                    {
+                      "name": "area",
+                      "expression": "`area`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Anomalies by Area",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "count(*)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "area",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "anomalies_by_reason",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "gold_anomalies",
+                  "fields": [
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(`*`)"
+                    },
+                    {
+                      "name": "detect_reason",
+                      "expression": "`detect_reason`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Anomalies by Detection Method",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "count(*)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "detect_reason",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 4,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "chiller_line",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "chiller_drift",
+                  "fields": [
+                    {
+                      "name": "reading_ts",
+                      "expression": "`reading_ts`"
+                    },
+                    {
+                      "name": "value",
+                      "expression": "`value`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Glycol Chiller Return Temp (Drift Pattern)",
+                "showTitle": true
+              },
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "reading_ts",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "value",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 12,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "recent_anomalies_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "recent_anomalies",
+                  "fields": [
+                    {
+                      "name": "reading_ts",
+                      "expression": "`reading_ts`"
+                    },
+                    {
+                      "name": "tag_id",
+                      "expression": "`tag_id`"
+                    },
+                    {
+                      "name": "asset_id",
+                      "expression": "`asset_id`"
+                    },
+                    {
+                      "name": "area",
+                      "expression": "`area`"
+                    },
+                    {
+                      "name": "value",
+                      "expression": "`value`"
+                    },
+                    {
+                      "name": "crit_threshold",
+                      "expression": "`crit_threshold`"
+                    },
+                    {
+                      "name": "zscore",
+                      "expression": "`zscore`"
+                    },
+                    {
+                      "name": "detect_reason",
+                      "expression": "`detect_reason`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "20 Most Recent Anomalies",
+                "showTitle": true
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "reading_ts"
+                  },
+                  {
+                    "fieldName": "tag_id"
+                  },
+                  {
+                    "fieldName": "asset_id"
+                  },
+                  {
+                    "fieldName": "area"
+                  },
+                  {
+                    "fieldName": "value"
+                  },
+                  {
+                    "fieldName": "crit_threshold"
+                  },
+                  {
+                    "fieldName": "zscore"
+                  },
+                  {
+                    "fieldName": "detect_reason"
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 12,
+            "height": 7
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}

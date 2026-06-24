@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md-sandbox
 # MAGIC <div style="background:#1B3139; color:white; padding:24px; border-radius:8px;">
 # MAGIC   <h1 style="margin:0; color:white;">Lab 1 — Store → SKU Recommender (propensity model)</h1>
@@ -29,6 +33,10 @@
 # MAGIC <div style="background:#bde6ff; border-radius:8px; padding:12px; margin:10px 0;">
 # MAGIC   <strong>🤖 Genie Code:</strong> press <kbd>Cmd</kbd>+<kbd>I</kbd> in a cell, paste the prompt, let
 # MAGIC   it write the code. Reference solutions are included so you're never stuck.
+# MAGIC </div>
+# MAGIC
+# MAGIC <div style="background:#FF3621; border-radius:8px; padding:12px; margin:10px 0;">
+# MAGIC   Tested on Serverless v5
 # MAGIC </div>
 
 # COMMAND ----------
@@ -250,6 +258,61 @@ top5 = candidates.sort_values("score", ascending=False).head(5)
 print(f"Store {sample_account} ({acct['banner']}, {acct['region']}) — recommended next SKUs:")
 display(spark.createDataFrame(
     top5[["sku_id", "brand", "category", "base_price", "score"]].round({"score": 3})))
+
+# COMMAND ----------
+
+# DBTITLE 1,Cell 18
+# MAGIC %md
+# MAGIC ## Step 7 — Batch inference: score all stores and write to Unity Catalog
+# MAGIC
+# MAGIC Now we run the model across **every store × every uncarried SKU**, attach a scoring timestamp,
+# MAGIC and persist the results as a Delta table keyed on `(account_id, scored_at)`. Downstream
+# MAGIC apps or dashboards can query this table directly.
+
+# COMMAND ----------
+
+# DBTITLE 1,Step 7: Batch inference — score all stores, write to UC
+from pyspark.sql import functions as F
+from pyspark.sql.types import DoubleType
+
+# Load champion model from Unity Catalog
+champion = mlflow.sklearn.load_model(f"models:/{UC_MODEL}@champion")
+
+# Pandas UDF: vectorized scoring via predict_proba
+@F.pandas_udf(DoubleType())
+def score_propensity(*cols: pd.Series) -> pd.Series:
+    X = pd.concat(cols, axis=1)
+    X.columns = FEATURES
+    return pd.Series(champion.predict_proba(X)[:, 1])
+
+# Candidate set: all (store × product) pairs NOT already carried
+candidates = (
+    spark.table(SALES_DIM_ACCOUNT).select("account_id", "banner", "channel", "region", "size_tier")
+    .crossJoin(spark.table(SALES_DIM_PRODUCT).select("sku_id", "brand", "category", "pack_units", "abv", "base_price", "popularity"))
+    .join(spark.table(SALES_FACT_ASSORTMENT), on=["account_id", "sku_id"], how="left_anti")
+)
+
+# Score, timestamp, and persist
+OUTPUT_TABLE = f"{CATALOG}.{SALES}.store_sku_recommendations"
+
+(
+    candidates
+    .withColumn("score", score_propensity(*[F.col(c) for c in FEATURES]))
+    .withColumn("scored_at", F.current_timestamp())
+    .select("account_id", "sku_id", "brand", "category", "score", "scored_at")
+    .write.format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(OUTPUT_TABLE)
+)
+
+print(f"Wrote to {OUTPUT_TABLE}")
+display(spark.table(OUTPUT_TABLE).orderBy("account_id", F.desc("score")).limit(10))
+
+# COMMAND ----------
+
+# 14k predictions in ~15 seconds is slow compared to model serving, but this can scale sublinearly
+spark.sql(f"SELECT count(*) FROM {OUTPUT_TABLE}").display()
 
 # COMMAND ----------
 

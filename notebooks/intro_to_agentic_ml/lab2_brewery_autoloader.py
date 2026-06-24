@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md-sandbox
 # MAGIC <div style="background:#1B3139; color:white; padding:24px; border-radius:8px;">
 # MAGIC   <h1 style="margin:0; color:white;">Lab 2A — Brewery OT Anomaly Detection (Auto Loader)</h1>
@@ -25,6 +29,10 @@
 # MAGIC <div style="background:#bde6ff; border-radius:8px; padding:12px; margin:10px 0;">
 # MAGIC   <strong>🤖 Genie Code throughout:</strong> press <kbd>Cmd</kbd>+<kbd>I</kbd> in the code
 # MAGIC   cell, paste the prompt, let Genie write it. Reference solutions are included.
+# MAGIC </div>
+# MAGIC
+# MAGIC <div style="background:#FF3621; border-radius:8px; padding:12px; margin:10px 0;">
+# MAGIC   Tested on Serverless v5
 # MAGIC </div>
 
 # COMMAND ----------

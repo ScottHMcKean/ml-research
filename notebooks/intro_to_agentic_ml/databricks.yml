@@ -24,11 +24,12 @@ variables:
   brewery_schema:
     description: Schema for brewery OT telemetry tables (Lab 2 Auto Loader)
     default: brewery
+  warehouse_id:
+    description: SQL warehouse for dashboard queries
+    default: "00561d7e0887675c"
 
 resources:
   jobs:
-
-    # --- Data generation: run ONCE to populate the workshop tables ---------
     ml_workshop_data_generation:
       name: "[ML Workshop] Generate synthetic data (run once)"
       tags:
@@ -81,6 +82,58 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               brewery_schema: ${var.brewery_schema}
+
+    # --- Combined: starts the streaming data generator AND the anomaly pipeline
+    #     in parallel so a single `bundle run` lights up end-to-end.
+    ml_workshop_live_demo:
+      name: "[ML Workshop] Live Demo (generator + pipeline)"
+      tags:
+        project: ml-workshop
+      tasks:
+        - task_key: start_pipeline
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.brewery_anomaly.id}
+            full_refresh: false
+        - task_key: stream_to_volume
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "Standard_DS3_v2"
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            single_user_name: ${workspace.current_user.userName}
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode
+          notebook_task:
+            notebook_path: ./src/write_to_volume.py
+            base_parameters:
+              catalog: ${var.catalog}
+              brewery_schema: ${var.brewery_schema}
+
+  pipelines:
+    brewery_anomaly:
+      name: "[ML Workshop] Brewery OT Anomaly Detection"
+      catalog: ${var.catalog}
+      target: ${var.brewery_schema}
+      libraries:
+        - glob:
+            include: ./src/pipelines/brewery_anomaly/**
+      serverless: true
+      continuous: true
+      development: true
+      photon: true
+      channel: current
+      configuration:
+        catalog: ${var.catalog}
+        brewery_schema: ${var.brewery_schema}
+
+  dashboards:
+    brewery_anomaly_monitor:
+      display_name: "Brewery OT — Live Anomaly Monitor"
+      file_path: ./src/dashboards/brewery_anomaly_monitor.lvdash.json
+      warehouse_id: ${var.warehouse_id}
 
 targets:
   dev:

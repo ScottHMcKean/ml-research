@@ -119,19 +119,17 @@ def trickle(n_batches=6, window_minutes=30, interval_seconds=10, live_anomaly_fr
     return total
 
 
-def stream_forever(window_minutes=30, interval_seconds=20, anomaly_after_batches=5):
-    """Continuously emit micro-batches until the job run is cancelled — so an Auto
-    Loader stream keeps seeing new files arrive throughout Lab 2. The chiller-drift
-    anomaly turns on after `anomaly_after_batches` batches, so the lab sees a stretch
-    of normal data before the fault appears. Each iteration walks the window forward
-    and drops one JSON file, then sleeps `interval_seconds`."""
-    anchor = datetime(2026, 6, 22, 0, 0)
+def stream_forever(window_minutes=5, interval_seconds=20, anomaly_after_batches=5):
+    """Continuously emit micro-batches anchored to REAL wall-clock time — so
+    readings are always recent (never in the future). The chiller-drift anomaly
+    turns on after `anomaly_after_batches` batches. Each iteration emits one
+    JSON file covering (now - window_minutes, now], then sleeps."""
     b, total = 0, 0
     print(f"Streaming OT files to {INCOMING} every {interval_seconds}s "
           f"(anomaly starts at batch {anomaly_after_batches}). Cancel the run to stop.")
     while True:
-        win_start = anchor + timedelta(minutes=window_minutes * b)
-        win_end = win_start + timedelta(minutes=window_minutes)
+        win_end = datetime.utcnow()
+        win_start = win_end - timedelta(minutes=window_minutes)
         live = b >= anomaly_after_batches
         pdf = _readings_for_window(win_start, win_end, live_anomaly=live)
         recs = _to_sparkplug_records(pdf)
@@ -149,4 +147,4 @@ def stream_forever(window_minutes=30, interval_seconds=20, anomaly_after_batches
 # DBTITLE 1,Stream continuously — this is what the streaming job runs (cancel to stop)
 # Drops a new Sparkplug-B file every 20s; the chiller-drift anomaly turns on at batch 5.
 # Runs until the job is cancelled (or the job's timeout is hit).
-stream_forever(window_minutes=30, interval_seconds=20, anomaly_after_batches=5)
+stream_forever(window_minutes=5, interval_seconds=20, anomaly_after_batches=5)

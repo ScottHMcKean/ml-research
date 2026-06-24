@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md-sandbox
 # MAGIC <div style="background:#1B3139; color:white; padding:24px; border-radius:8px;">
 # MAGIC   <h1 style="margin:0; color:white;">Lab 3 — Demand Forecasting, the Agentic Way</h1>
@@ -31,6 +35,13 @@
 # MAGIC   </ul>
 # MAGIC   Each step has one <strong>🤖 Agentic move</strong> — the single best way to let the agent do it.
 # MAGIC </div>
+# MAGIC
+# MAGIC <div style="background:#FF3621; border-radius:8px; padding:12px; margin:10px 0;">
+# MAGIC   Tested on Serverless v5
+# MAGIC </div>
+# MAGIC
+# MAGIC
+# MAGIC
 
 # COMMAND ----------
 
@@ -373,7 +384,7 @@ display(spark.createDataFrame(board))
 # COMMAND ----------
 
 # MAGIC %md-sandbox
-# MAGIC ## Step 7 — Register → test: load the LightGBM model from Unity Catalog
+# MAGIC ## Step 7 — Register → test: load the champion model from Unity Catalog
 # MAGIC
 # MAGIC <div style="background:#F1F1F1; border-left:5px solid #1B5161; padding:15px; margin:15px 0;">
 # MAGIC   Same loop as Lab 1: the model is now a <strong>governed, versioned object in Unity Catalog</strong>
