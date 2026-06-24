@@ -53,30 +53,18 @@ resources:
       queue:
         enabled: true
 
-    # --- Streaming: continuously drops Sparkplug-B JSON micro-batches on the
-    #     Volume (the Auto Loader source for Lab 2). START IT and leave it running
-    #     through Lab 2, then cancel the run. Runs on a small single-node CLASSIC
-    #     cluster (continuous producer loop isn't a serverless-notebook fit).
-    #     node_type_id below is Azure; change it for AWS (e.g. m5d.large) / GCP.
+    # --- Streaming: drops Sparkplug-B JSON micro-batches on the Volume (the Auto
+    #     Loader source for Lab 2) on SERVERLESS compute (near-instant start). The
+    #     producer self-terminates after max_batches (set in write_to_volume.py),
+    #     so the run finishes SUCCESS — re-run the job for another demo pass.
     ml_workshop_streaming:
-      name: "[ML Workshop] Stream telemetry to the landing volume (continuous)"
+      name: "[ML Workshop] Stream telemetry to the landing volume"
       tags:
         project: ml-workshop
-      timeout_seconds: 7200          # safety cap: auto-stop after 2h if forgotten
+      timeout_seconds: 1800          # safety cap; producer self-terminates well before this
       tasks:
         - task_key: write_to_volume
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            node_type_id: "Standard_DS3_v2"
-            num_workers: 0
-            # Single-user mode so Unity Catalog is enabled (the notebook reads/writes UC).
-            data_security_mode: SINGLE_USER
-            single_user_name: ${workspace.current_user.userName}
-            spark_conf:
-              spark.databricks.cluster.profile: singleNode
-              spark.master: "local[*]"
-            custom_tags:
-              ResourceClass: SingleNode
+          # Serverless compute — no classic-cluster cold start.
           notebook_task:
             notebook_path: ./src/write_to_volume.py
             base_parameters:
@@ -95,17 +83,7 @@ resources:
             pipeline_id: ${resources.pipelines.brewery_anomaly.id}
             full_refresh: false
         - task_key: stream_to_volume
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            node_type_id: "Standard_DS3_v2"
-            num_workers: 0
-            data_security_mode: SINGLE_USER
-            single_user_name: ${workspace.current_user.userName}
-            spark_conf:
-              spark.databricks.cluster.profile: singleNode
-              spark.master: "local[*]"
-            custom_tags:
-              ResourceClass: SingleNode
+          # Serverless compute — no classic-cluster cold start.
           notebook_task:
             notebook_path: ./src/write_to_volume.py
             base_parameters:

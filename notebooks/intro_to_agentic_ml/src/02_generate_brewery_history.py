@@ -118,6 +118,10 @@ print(f"Wrote {BREW_FACT_READINGS}")
 
 # DBTITLE 1,fact_anomaly_labels — ground-truth windows for Lab 2 evaluation
 labels_pdf = pd.DataFrame(anomaly_label_rows())
+# Keep only labels whose window overlaps the (shortened) history span, so Lab 2's
+# recall eval scores against anomalies that actually have data in fact_sensor_readings.
+labels_pdf = labels_pdf[(labels_pdf["start_ts"] < HIST_END) & (labels_pdf["end_ts"] > HIST_START)].reset_index(drop=True)
+print(f"In-window anomaly labels: {len(labels_pdf)} (of {len(anomaly_label_rows())} total)")
 LABEL_SCHEMA = T.StructType([
     T.StructField("asset_id",     T.StringType(),    False),
     T.StructField("tag_id",       T.StringType(),    False),

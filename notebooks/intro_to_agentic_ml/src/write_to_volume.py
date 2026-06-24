@@ -119,17 +119,23 @@ def trickle(n_batches=6, window_minutes=30, interval_seconds=10, live_anomaly_fr
     return total
 
 
-def stream_forever(window_minutes=30, interval_seconds=20, anomaly_after_batches=5):
-    """Continuously emit micro-batches until the job run is cancelled — so an Auto
-    Loader stream keeps seeing new files arrive throughout Lab 2. The chiller-drift
-    anomaly turns on after `anomaly_after_batches` batches, so the lab sees a stretch
-    of normal data before the fault appears. Each iteration walks the window forward
-    and drops one JSON file, then sleeps `interval_seconds`."""
+def stream_forever(window_minutes=30, interval_seconds=20, anomaly_after_batches=5, max_batches=None):
+    """Emit micro-batches so an Auto Loader stream keeps seeing new files arrive
+    throughout Lab 2. The chiller-drift anomaly turns on after `anomaly_after_batches`
+    batches, so the lab sees a stretch of normal data before the fault appears. Each
+    iteration walks the window forward and drops one JSON file, then sleeps
+    `interval_seconds`. Runs for `max_batches` iterations then **self-terminates
+    cleanly** (so the serverless run finishes SUCCESS, not a timeout); pass
+    max_batches=None to run until the run is cancelled."""
     anchor = datetime(2026, 6, 22, 0, 0)
     b, total = 0, 0
     print(f"Streaming OT files to {INCOMING} every {interval_seconds}s "
-          f"(anomaly starts at batch {anomaly_after_batches}). Cancel the run to stop.")
+          f"(anomaly at batch {anomaly_after_batches}, "
+          f"{'stops after %d batches' % max_batches if max_batches else 'runs until cancelled'}).")
     while True:
+        if max_batches is not None and b >= max_batches:
+            print(f"Reached max_batches={max_batches}; clean stop. Emitted {total:,} records in {b} files.")
+            break
         win_start = anchor + timedelta(minutes=window_minutes * b)
         win_end = win_start + timedelta(minutes=window_minutes)
         live = b >= anomaly_after_batches
@@ -146,9 +152,10 @@ def stream_forever(window_minutes=30, interval_seconds=20, anomaly_after_batches
 
 # COMMAND ----------
 
-# DBTITLE 1,Stream continuously — this is what the streaming job runs (cancel to stop)
+# DBTITLE 1,Stream the demo window — bounded so the serverless run finishes cleanly
 # Demo-paced: a new Sparkplug-B file every ~4s so the pipeline + dashboard fill within
-# a couple of minutes; the chiller-drift anomaly turns on at batch 4 (≈15s in) so the
-# live anomaly is visible almost immediately. Runs until the run is cancelled / times out.
-stream_forever(window_minutes=30, interval_seconds=4, anomaly_after_batches=4)
+# a couple of minutes; the chiller-drift anomaly turns on at batch 4 (≈15s in). Stops
+# cleanly after 150 batches (~10 min) so the serverless run ends SUCCESS — re-run the
+# job for another demo pass. Set max_batches=None to stream until cancelled.
+stream_forever(window_minutes=30, interval_seconds=4, anomaly_after_batches=4, max_batches=150)
 
