@@ -119,8 +119,8 @@ for suffix in ("log_amount", "is_night", "high_amount", "category_ordinal"):
 # MAGIC the online store always returns the *current* counter, which is exactly the hot-path
 # MAGIC behavior we want. We **seed** from full history so every instrument has a row for
 # MAGIC training; in production `07_streaming_counters` overwrites these with rolling 1h
-# MAGIC values every few seconds. Missing keys fall back to `0` via `default_values` in the
-# MAGIC training lookup (04).
+# MAGIC values every few seconds. Missing keys yield nulls, which LightGBM handles natively
+# MAGIC (the seed covers every instrument in the data, so nulls are rare).
 
 # COMMAND ----------
 

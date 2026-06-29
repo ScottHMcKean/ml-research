@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import time
+import math
 import uuid
 import random
 import threading
@@ -132,9 +133,9 @@ class ScoreRequest(BaseModel):
 @app.post("/score")
 def score(req: ScoreRequest):
     global _events_scored, _blocked_by_rules
-    rec = req.model_dump()
-    if not rec.get("instrument_id"):
-        rec = {**synth_event(), **{k: v for k, v in rec.items() if v is not None}}
+    # Fill any field the caller omitted from a synthetic event, so empty or partial
+    # request bodies still produce a complete, scorable record (avoids None in the rules).
+    rec = {**synth_event(), **{k: v for k, v in req.model_dump().items() if v is not None}}
     rec = {k: rec[k] for k in ("instrument_id", "account_id", "category_code", "amount")}
 
     t0 = time.perf_counter()
@@ -151,12 +152,14 @@ def score(req: ScoreRequest):
     payload = {**rec, "event_ts": dt.datetime.utcnow().isoformat()}
     resp = w.serving_endpoints.query(name=SERVING_ENDPOINT, dataframe_records=[payload])
     elapsed = (time.perf_counter() - t0) * 1000
-    proba = float(resp.predictions[0]) if resp.predictions else 0.0
+    # The fe.log_model LightGBM classifier serves the predicted class (0/1), not a
+    # calibrated probability, so report it as the model's output rather than a score.
+    output = float(resp.predictions[0]) if resp.predictions else 0.0
     with _lock:
         _events_scored += 1
         _latencies.append(elapsed)
-    return {"decision": "blocked" if proba >= 0.5 else "pass", "stage": "model",
-            "score": round(proba, 4), "latency_ms": round(elapsed, 1)}
+    return {"decision": "blocked" if output >= 0.5 else "pass", "stage": "model",
+            "model_output": round(output, 4), "latency_ms": round(elapsed, 1)}
 
 
 @app.post("/generate")
@@ -189,7 +192,10 @@ def metrics():
         gen, scored, blocked = _events_generated, _events_scored, _blocked_by_rules
 
     def pct(p):
-        return round(lat[min(n - 1, int(p / 100 * n))], 1) if n else None
+        # Nearest-rank percentile: ceil(p/100 * n) - 1, clamped to [0, n-1].
+        if not n:
+            return None
+        return round(lat[max(0, min(n - 1, math.ceil(p / 100 * n) - 1))], 1)
 
     return {
         "events_generated": gen,

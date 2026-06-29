@@ -108,7 +108,6 @@ outcome = np.where(
 raw = pd.DataFrame({
     "event_id": [f"EVT_{i:010d}" for i in range(N_EVENTS)],
     "event_ts": event_ts,
-    "event_date": pd.Series(event_ts).dt.date.astype("datetime64[ns]"),
     "instrument_id": instrument_id,
     "account_id": account_id,
     "bin_prefix": bin_prefix,
@@ -137,8 +136,12 @@ raw.head()
     .saveAsTable(f"{CATALOG}.{SCHEMA}.account_profile_raw")
 )
 
+from pyspark.sql import functions as F
+
 (
     spark.createDataFrame(raw)
+    # Derive a true DATE partition column (matches the date literals the App inserts).
+    .withColumn("event_date", F.to_date("event_ts"))
     .write.mode("overwrite").option("overwriteSchema", "true")
     .partitionBy("event_date")
     .saveAsTable(RAW_EVENTS)
