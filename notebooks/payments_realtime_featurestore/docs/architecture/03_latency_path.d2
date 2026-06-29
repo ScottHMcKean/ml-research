@@ -1,0 +1,24 @@
+# Request-time latency path (target p99 < 50ms)
+shape: sequence_diagram
+
+app: App /score
+rules: Stage-0 rules
+ep: Serving endpoint
+lb: Lakebase online store
+m: LightGBM
+
+app -> rules: evaluate cheap pre-filters (<1ms)
+alt: "rule fires vs passes" {
+  fired: {
+    rules -> app: blocked (short-circuit)
+  }
+  passes: {
+    app -> ep: query(keys + amount + event_ts)
+    ep -> lb: point lookups (counters, daily, monthly, profile)
+    lb -> ep: feature values (~ms)
+    ep -> ep: compute on-demand UDFs
+    ep -> m: inference
+    m -> ep: score
+    ep -> app: decision + latency_ms
+  }
+}
