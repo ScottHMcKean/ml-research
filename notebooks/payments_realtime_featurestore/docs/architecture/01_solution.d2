@@ -1,43 +1,72 @@
-# Payments real-time feature store — end-to-end solution
-direction: right
+# Payments real-time feature store — end-to-end solution (portrait)
+# Render: d2 01_solution.d2 01_solution.svg
+# Layout: dagre (free). Never TALA for shared diagrams.
 
-app: Databricks App (FastAPI) {
-  gen: Event generator\n(cost-effective Kafka stand-in)
-  score: /score\nrules + model
-  dash: Live dashboard\nthroughput · p50/p99
-  bk: /backfill trigger
+direction: down
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    pad: 40
+  }
 }
 
-uc: Unity Catalog (offline) {
-  raw: raw_events\n(authorization stream) {shape: cylinder}
-  ftc: ft_instrument_counters_1h {shape: cylinder}
-  ftd: ft_account_daily\n(cache, fed forward) {shape: cylinder}
-  ftm: ft_account_monthly\n(cache, fed forward) {shape: cylinder}
-  ftp: ft_account_profile {shape: cylinder}
-  model: payments_lgbm\n(UC model) {shape: page}
+# --- Databricks palette ----------------------------------------------------
+classes: {
+  source:  { style: { fill: "#F4F1EC"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10; font-size: 20 } }
+  compute: { style: { fill: "#FFECE7"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10; font-size: 20 } }
+  store:   { style: { fill: "#E8EDEE"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10; font-size: 20 } }
+  serve:   { style: { fill: "#FFD9D0"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10; font-size: 20 } }
+  govern:  { style: { fill: "#1B3139"; stroke: "#1B3139"; font-color: "#FFFFFF"; border-radius: 10; font-size: 20 } }
+  group:   { style: { fill: "#FBFAF8"; stroke: "#C7CBD1"; stroke-dash: 3; border-radius: 14; font-size: 16; font-color: "#1B3139" } }
 }
 
+title: |md
+  # Payments Real-Time Feature Store
+| { near: top-center; style: { font-size: 26; bold: true; font-color: "#1B3139" } }
+
+# ---------------------------------------------------------------- App (control plane)
+app: Databricks App · FastAPI {
+  class: group
+  gen: Event generator\ncost-effective source { class: compute }
+  score: Scorer\nrules + model { class: serve }
+  dash: Live dashboard\nthroughput · p50/p99 { class: source }
+}
+
+# ---------------------------------------------------------------- Offline (Unity Catalog)
+uc: Unity Catalog · offline {
+  class: group
+  raw: raw_events\nauthorization stream { class: store }
+  feats: Feature tables\ncounters · daily · monthly · profile { class: store }
+  model: payments_lgbm\nUC model { class: store }
+}
+
+# ---------------------------------------------------------------- Jobs
 jobs: Jobs {
-  stream: 07 streaming counters\n(1h rolling)
-  daily: 08 backfill cache\n(daily / monthly)
-  train: 04 train LightGBM\ncreate_training_set + log_model
+  class: group
+  cnt: Counter refresh\n1h rolling (5 min) { class: compute }
+  bf: Backfill cache\ndaily / monthly { class: compute }
+  train: Train LightGBM\ntraining set + log_model { class: compute }
 }
 
-lb: Lakebase\nOnline Feature Store {shape: cylinder; style.fill: "#ffe0e0"}
-ep: Model Serving endpoint\nautomatic feature lookup {shape: hexagon}
+# ---------------------------------------------------------------- Online + serving
+online: Lakebase\nOnline Feature Store { class: store }
+ep: Model Serving\nautomatic feature lookup { class: serve }
 
-app.gen -> uc.raw
-uc.raw -> jobs.stream -> uc.ftc
-uc.raw -> jobs.daily -> uc.ftd
-jobs.daily -> uc.ftm
-uc.raw -> uc.ftp
-uc.ftc -> lb: publish
-uc.ftd -> lb: publish
-uc.ftm -> lb: publish
-uc.ftp -> lb: publish
-uc.raw -> jobs.train -> uc.model -> ep
-lb -> ep: online lookup
-app.score -> ep
-ep -> app.score
-app.bk -> jobs.daily
-app.score -> app.dash
+# ---------------------------------------------------------------- Flow (top -> bottom)
+app.gen -> uc.raw: generate events { style.stroke: "#1B3139" }
+uc.raw -> jobs.cnt: { style.stroke: "#1B3139" }
+uc.raw -> jobs.bf: { style.stroke: "#1B3139" }
+uc.raw -> jobs.train: { style.stroke: "#1B3139" }
+jobs.cnt -> uc.feats: { style.stroke: "#1B3139" }
+jobs.bf -> uc.feats: { style.stroke: "#1B3139" }
+jobs.train -> uc.model: { style.stroke: "#1B3139" }
+
+uc.feats -> online: publish { style.stroke: "#FF3621" }
+uc.model -> ep: deploy { style.stroke: "#FF3621" }
+online -> ep: online lookup { style.stroke: "#FF3621" }
+
+app.score -> ep: score request { style.stroke: "#1B3139" }
+ep -> app.score: decision + latency { style.stroke: "#1B3139" }
+app.score -> app.dash: { style.stroke: "#1B3139" }
+app.score -> jobs.bf: trigger backfill { style.stroke-dash: 4; style.stroke: "#FF3621" }
