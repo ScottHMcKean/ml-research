@@ -61,10 +61,12 @@ resources:
             base_parameters:
               grain: both
 
-    payments_counters_streaming:
-      name: "[${bundle.target}] Payments — Streaming counter refresh (hot path)"
-      continuous:
-        pause_status: PAUSED
+    payments_counters_refresh:
+      name: "[${bundle.target}] Payments — Counter refresh (hot path)"
+      schedule:
+        quartz_cron_expression: "0 */5 * * * ?"   # every 5 minutes
+        timezone_id: UTC
+        pause_status: UNPAUSED
       tasks:
         - task_key: counters
           notebook_task:

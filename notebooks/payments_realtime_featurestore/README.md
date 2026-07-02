@@ -67,8 +67,8 @@ databricks bundle deploy -t dev --var="payments_warehouse_id=<warehouse-id>"
 # 3. Run the full pipeline (seed → features → online → train → serve → benchmark)
 databricks bundle run payments_setup_and_train -t dev
 
-# 4. (optional) start the hot-counter stream / schedule the cache backfill
-databricks bundle run payments_counters_streaming -t dev   # continuous, paused by default
+# 4. (optional) run the hot-counter refresh / cache backfill on demand
+databricks bundle run payments_counters_refresh -t dev   # also scheduled every 5 min
 databricks bundle run payments_backfill_cache -t dev
 ```
 
