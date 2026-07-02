@@ -1,0 +1,43 @@
+# Feature topology & cache feed-forward
+direction: down
+
+req: Scoring request\ninstrument_id · account_id · category_code · amount · event_ts {shape: oval; style.fill: "#e0ecff"}
+
+ondemand: On-demand (computed in-request) {
+  f1: odf_log_amount
+  f2: odf_is_night
+  f3: odf_high_amount
+  f4: odf_category_ordinal
+}
+
+hot: Hot — latest value {
+  c: instrument counters\ntxn_cnt · fail_ratio · distinct_accts\nrefreshed ~30s (1h rolling) {shape: cylinder}
+}
+
+warm: Warm — point-in-time, fed forward {
+  d: account daily\neffective at next-day 00:00 {shape: cylinder}
+  m: account monthly\neffective at next-month 00:00 {shape: cylinder}
+}
+
+ref: Reference {
+  p: account profile\nis_premium · age · region · decline_rate {shape: cylinder}
+}
+
+vec: feature vector {shape: parallelogram}
+lgbm: LightGBM -> blocked? {shape: hexagon; style.fill: "#ffe0e0"}
+
+req -> ondemand: amount, event_ts, category_code
+req -> hot: instrument_id
+req -> warm: account_id + event_ts
+req -> ref: account_id
+ondemand -> vec
+hot -> vec
+warm -> vec
+ref -> vec
+vec -> lgbm
+
+note: |md
+  **Feed forward:** a daily/monthly row becomes effective at period end, so an event
+  uses the most recent **completed** period and carries it forward until the next
+  scheduled backfill — point-in-time correct for both training and serving.
+| {near: bottom-center; style.fill: "#fffbe0"}

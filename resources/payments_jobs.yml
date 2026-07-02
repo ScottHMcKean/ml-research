@@ -1,0 +1,92 @@
+# Payments real-time feature-store + serving demo.
+# Infrastructure and orchestration for notebooks/payments_realtime_featurestore/.
+#
+# Compute is serverless (the FE-VM workspace is serverless-only); the notebooks %pip
+# install their own ML deps (databricks-feature-engineering, lightgbm).
+#
+# Note: the LightGBM serving endpoint (05) and the Lakebase Online Feature Store (03) are
+# created by the Feature Engineering SDK inside their notebooks — they depend on the
+# trained/registered model version and on managed Lakebase provisioning, neither of which
+# is a declarable bundle resource. Everything else (schema, model, jobs, app) is DABs.
+
+variables:
+  payments_warehouse_id:
+    description: SQL warehouse id the App uses to insert generated events into the raw table.
+    default: ""
+
+resources:
+  # The schema (shm_skunkworks_catalog.payments) and the registered model
+  # (…payments.payments_lgbm) are created with literal names by 00_setup and 04 — they are
+  # intentionally NOT declared here, because this bundle runs in `mode: development`, which
+  # would prefix declared resource names (dev_<user>_…) and diverge from what the notebooks
+  # and serving endpoint reference.
+  jobs:
+    payments_setup_and_train:
+      name: "[${bundle.target}] Payments — Seed, Features, Online, Train, Serve, Benchmark"
+      tasks:
+        - task_key: seed_data
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/01_seed_data.py
+        - task_key: feature_engineering
+          depends_on: [{task_key: seed_data}]
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/02_feature_engineering.py
+        - task_key: online_store
+          depends_on: [{task_key: feature_engineering}]
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/03_online_store.py
+        - task_key: train_register
+          depends_on: [{task_key: online_store}]
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/04_train_register.py
+        - task_key: serving
+          depends_on: [{task_key: train_register}]
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/05_serving.py
+        - task_key: benchmark
+          depends_on: [{task_key: serving}]
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/06_benchmark.py
+
+    payments_backfill_cache:
+      name: "[${bundle.target}] Payments — Backfill daily & monthly caches"
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"   # daily at 02:00
+        timezone_id: UTC
+        pause_status: PAUSED
+      tasks:
+        - task_key: backfill
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/08_backfill_cache.py
+            base_parameters:
+              grain: both
+
+    payments_counters_refresh:
+      name: "[${bundle.target}] Payments — Counter refresh (hot path)"
+      schedule:
+        quartz_cron_expression: "0 */5 * * * ?"   # every 5 minutes
+        timezone_id: UTC
+        pause_status: UNPAUSED
+      tasks:
+        - task_key: counters
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/07_streaming_counters.py
+
+  apps:
+    payments_app:
+      name: "payments-feature-store-demo"
+      description: "Synthetic event generator, scorer, cache backfill trigger, and latency dashboard."
+      source_code_path: ../notebooks/payments_realtime_featurestore/app
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.payments_warehouse_id}
+            permission: CAN_USE
+        - name: backfill-job
+          job:
+            id: ${resources.jobs.payments_backfill_cache.id}
+            permission: CAN_MANAGE_RUN
+        - name: serving-endpoint
+          serving_endpoint:
+            name: payments-scoring
+            permission: CAN_QUERY

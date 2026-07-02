@@ -1,0 +1,43 @@
+# Payments real-time feature store — end-to-end solution
+direction: right
+
+app: Databricks App (FastAPI) {
+  gen: Event generator\n(cost-effective Kafka stand-in)
+  score: /score\nrules + model
+  dash: Live dashboard\nthroughput · p50/p99
+  bk: /backfill trigger
+}
+
+uc: Unity Catalog (offline) {
+  raw: raw_events\n(authorization stream) {shape: cylinder}
+  ftc: ft_instrument_counters_1h {shape: cylinder}
+  ftd: ft_account_daily\n(cache, fed forward) {shape: cylinder}
+  ftm: ft_account_monthly\n(cache, fed forward) {shape: cylinder}
+  ftp: ft_account_profile {shape: cylinder}
+  model: payments_lgbm\n(UC model) {shape: page}
+}
+
+jobs: Jobs {
+  stream: 07 streaming counters\n(1h rolling)
+  daily: 08 backfill cache\n(daily / monthly)
+  train: 04 train LightGBM\ncreate_training_set + log_model
+}
+
+lb: Lakebase\nOnline Feature Store {shape: cylinder; style.fill: "#ffe0e0"}
+ep: Model Serving endpoint\nautomatic feature lookup {shape: hexagon}
+
+app.gen -> uc.raw
+uc.raw -> jobs.stream -> uc.ftc
+uc.raw -> jobs.daily -> uc.ftd
+jobs.daily -> uc.ftm
+uc.raw -> uc.ftp
+uc.ftc -> lb: publish
+uc.ftd -> lb: publish
+uc.ftm -> lb: publish
+uc.ftp -> lb: publish
+uc.raw -> jobs.train -> uc.model -> ep
+lb -> ep: online lookup
+app.score -> ep
+ep -> app.score
+app.bk -> jobs.daily
+app.score -> app.dash

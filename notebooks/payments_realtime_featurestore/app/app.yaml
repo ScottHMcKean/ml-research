@@ -1,0 +1,16 @@
+# Databricks App configuration.
+# Resource keys referenced via `valueFrom` are wired in resources/payments_jobs.yml
+# (app resources: the serving endpoint, the SQL warehouse, and the backfill job).
+command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+env:
+  - name: CATALOG
+    value: shm_skunkworks_catalog
+  - name: SCHEMA
+    value: payments
+  - name: SERVING_ENDPOINT
+    value: payments-scoring
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: BACKFILL_JOB_ID
+    valueFrom: backfill-job
