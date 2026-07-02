@@ -11,11 +11,11 @@ vars: {
 }
 
 classes: {
-  source:  { style: { fill: "#F4F1EC"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10 } }
-  compute: { style: { fill: "#FFECE7"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10 } }
-  store:   { style: { fill: "#E8EDEE"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10 } }
-  serve:   { style: { fill: "#FFD9D0"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10 } }
-  govern:  { style: { fill: "#1B3139"; stroke: "#1B3139"; font-color: "#FFFFFF"; border-radius: 10 } }
+  source:  { style: { fill: "#F4F1EC"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10; font-size: 13 } }
+  compute: { style: { fill: "#FFECE7"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10; font-size: 13 } }
+  store:   { style: { fill: "#E8EDEE"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10; font-size: 13 } }
+  serve:   { style: { fill: "#FFD9D0"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10; font-size: 13 } }
+  govern:  { style: { fill: "#1B3139"; stroke: "#1B3139"; font-color: "#FFFFFF"; border-radius: 10; font-size: 13 } }
   group:   { style: { fill: "#FBFAF8"; stroke: "#C7CBD1"; stroke-dash: 3; border-radius: 14; font-size: 16; font-color: "#1B3139" } }
 }
 
@@ -23,31 +23,31 @@ title: |md
   # Feature Topology & Cache Feed-Forward
 | { near: top-center; style: { font-size: 26; bold: true; font-color: "#1B3139" } }
 
-req: Scoring request\ninstrument_id · account_id · category_code · amount · event_ts { class: serve; icon: ../icons/app.svg }
+req: Scoring request\ninstrument_id · account_id · category_code · amount · event_ts { class: serve }
 
 ondemand: On-demand · computed in-request {
   class: group
-  f: log_amount · is_night\nhigh_amount · category_ordinal { class: compute; icon: ../icons/features.svg }
+  f: log_amount · is_night\nhigh_amount · category_ordinal { class: compute }
 }
 
 hot: Hot · latest value {
   class: group
-  c: Instrument counters\ntxn_cnt · fail_ratio · distinct_accts\nrefreshed every 5 min (1h rolling) { class: store; icon: ../icons/counters.svg }
+  c: Instrument counters\ntxn_cnt · fail_ratio · distinct_accts\nrefreshed every 5 min (1h rolling) { class: store }
 }
 
 warm: Warm · point-in-time, fed forward {
   class: group
-  d: Account daily\neffective next-day 00:00 { class: store; icon: ../icons/daily.svg }
-  m: Account monthly\neffective next-month 00:00 { class: store; icon: ../icons/monthly.svg }
+  d: Account daily\neffective next-day 00:00 { class: store }
+  m: Account monthly\neffective next-month 00:00 { class: store }
 }
 
 ref: Reference {
   class: group
-  p: Account profile\nis_premium · age · region · decline_rate { class: store; icon: ../icons/profile.svg }
+  p: Account profile\nis_premium · age · region · decline_rate { class: store }
 }
 
-lb: Lakebase online store\nlow-latency point lookups { class: store; icon: ../icons/lakebase.svg }
-lgbm: LightGBM\nblocked? { class: serve; icon: ../icons/model.svg }
+lb: Lakebase online store\nlow-latency point lookups { class: store }
+lgbm: LightGBM\nblocked? { class: serve }
 
 req -> ondemand.f: amount · event_ts · category { style.stroke: "#1B3139" }
 req -> hot.c: instrument_id { style.stroke: "#1B3139" }
@@ -64,6 +64,5 @@ ondemand.f -> lgbm: { style.stroke: "#1B3139" }
 lb -> lgbm: joined feature vector { style.stroke: "#1B3139" }
 
 note: |md
-  **Feed forward** — a daily/monthly row is effective at period end, so an event
-  uses the most recent **completed** period until the next backfill (point-in-time).
-| { near: bottom-center; style: { font-size: 14; font-color: "#1B3139"; fill: "#FBFAF8" } }
+  **Feed forward** — events use the last **completed** daily/monthly period until the next backfill.
+| { near: bottom-center; style: { font-size: 13; font-color: "#1B3139"; fill: "#FBFAF8" } }

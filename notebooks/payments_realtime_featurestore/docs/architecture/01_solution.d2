@@ -13,11 +13,11 @@ vars: {
 
 # --- Databricks palette ----------------------------------------------------
 classes: {
-  source:  { style: { fill: "#F4F1EC"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10 } }
-  compute: { style: { fill: "#FFECE7"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10 } }
-  store:   { style: { fill: "#E8EDEE"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10 } }
-  serve:   { style: { fill: "#FFD9D0"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10 } }
-  govern:  { style: { fill: "#1B3139"; stroke: "#1B3139"; font-color: "#FFFFFF"; border-radius: 10 } }
+  source:  { style: { fill: "#F4F1EC"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10; font-size: 13 } }
+  compute: { style: { fill: "#FFECE7"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10; font-size: 13 } }
+  store:   { style: { fill: "#E8EDEE"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10; font-size: 13 } }
+  serve:   { style: { fill: "#FFD9D0"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10; font-size: 13 } }
+  govern:  { style: { fill: "#1B3139"; stroke: "#1B3139"; font-color: "#FFFFFF"; border-radius: 10; font-size: 13 } }
   group:   { style: { fill: "#FBFAF8"; stroke: "#C7CBD1"; stroke-dash: 3; border-radius: 14; font-size: 16; font-color: "#1B3139" } }
 }
 
@@ -28,30 +28,30 @@ title: |md
 # ---------------------------------------------------------------- App (control plane)
 app: Databricks App · FastAPI {
   class: group
-  gen: Event generator\ncost-effective source { class: compute; icon: ../icons/generator.svg }
-  score: Scorer\nrules + model { class: serve; icon: ../icons/app.svg }
-  dash: Live dashboard\nthroughput · p50/p99 { class: source; icon: ../icons/dashboard.svg }
+  gen: Event generator\ncost-effective source { class: compute }
+  score: Scorer\nrules + model { class: serve }
+  dash: Live dashboard\nthroughput · p50/p99 { class: source }
 }
 
 # ---------------------------------------------------------------- Offline (Unity Catalog)
 uc: Unity Catalog · offline {
   class: group
-  raw: raw_events\nauthorization stream { class: store; icon: ../icons/raw.svg }
-  feats: Feature tables\ncounters · daily · monthly · profile { class: store; icon: ../icons/features.svg }
-  model: payments_lgbm\nUC model { class: store; icon: ../icons/model.svg }
+  raw: raw_events\nauthorization stream { class: store }
+  feats: Feature tables\ncounters · daily · monthly · profile { class: store }
+  model: payments_lgbm\nUC model { class: store }
 }
 
 # ---------------------------------------------------------------- Jobs
 jobs: Jobs {
   class: group
-  cnt: Counter refresh\n1h rolling (5 min) { class: compute; icon: ../icons/counters.svg }
-  bf: Backfill cache\ndaily / monthly { class: compute; icon: ../icons/backfill.svg }
-  train: Train LightGBM\ntraining set + log_model { class: compute; icon: ../icons/train.svg }
+  cnt: Counter refresh\n1h rolling (5 min) { class: compute }
+  bf: Backfill cache\ndaily / monthly { class: compute }
+  train: Train LightGBM\ntraining set + log_model { class: compute }
 }
 
 # ---------------------------------------------------------------- Online + serving
-online: Lakebase\nOnline Feature Store { class: store; icon: ../icons/lakebase.svg }
-ep: Model Serving\nautomatic feature lookup { class: serve; icon: ../icons/serving.svg }
+online: Lakebase\nOnline Feature Store { class: store }
+ep: Model Serving\nautomatic feature lookup { class: serve }
 
 # ---------------------------------------------------------------- Flow (top -> bottom)
 app.gen -> uc.raw: generate events { style.stroke: "#1B3139" }
