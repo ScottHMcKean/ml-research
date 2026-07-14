@@ -10,3 +10,12 @@ targets:
     mode: development
     workspace:
       profile: DEFAULT
+
+  # Skunkworks FEVM (AWS). The anomaly_detection pipeline is fully serverless, so
+  # deploy it in isolation:
+  #   databricks bundle deploy -t skunkworks --resource anomaly_detection_pipeline
+  #   databricks bundle run anomaly_detection_pipeline -t skunkworks
+  skunkworks:
+    mode: development
+    workspace:
+      profile: fe-vm-shm-skunkworks
