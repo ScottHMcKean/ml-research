@@ -68,12 +68,13 @@ for name, out in preds.items():
 summary = pd.DataFrame(rows).set_index("model")
 print(summary.round(3))
 
-# Per-failure-mode recall at each model's calibrated threshold.
+# Per-failure-mode recall at each model's calibrated threshold. Held-out rows only
+# (the 2 labeled failures are excluded, consistent with the ranking metrics above).
 mode_recall = {}
 for name, out in preds.items():
-    flag = out["is_anomaly"].to_numpy()
+    flag = out["is_anomaly"].to_numpy()[held]
     mode_recall[name] = (
-        pd.DataFrame({"mode": pdf["failure_mode"], "flag": flag})
+        pd.DataFrame({"mode": pdf["failure_mode"].to_numpy()[held], "flag": flag})
         .query("mode != 'normal'").groupby("mode")["flag"].mean()
     )
 mode_recall = pd.DataFrame(mode_recall).round(2)

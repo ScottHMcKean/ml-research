@@ -177,8 +177,8 @@ df["vibration_peak"] = np.maximum(df["vibration_peak"], df["vibration_rms"] * 1.
 
 # MAGIC %md
 # MAGIC ## 3. Reveal only a couple of observed failures (the few-shot signal)
-# MAGIC Of the ~100 failure rows, we mark just **`N_LABELED` = 2** as "observed" — one
-# MAGIC near-peak-severity row from two *different* failure modes, mimicking a
+# MAGIC Of the ~80 failure rows, we mark just **`N_LABELED` = 2** as "observed" — the
+# MAGIC peak-severity row from two *different* failure modes, mimicking a
 # MAGIC maintenance team that has confirmed a small handful of past failures. Everything
 # MAGIC else is unlabeled as far as the detectors are concerned.
 
@@ -187,11 +187,15 @@ df["vibration_peak"] = np.maximum(df["vibration_peak"], df["vibration_rms"] * 1.
 df["is_labeled"] = 0
 
 # Pick the peak-severity row of two distinct modes so the labels are informative.
+# Severity ramps 0.3 -> 1.0 across an episode, so the *last* row of an episode is the
+# peak. A mode can appear in more than one episode, so we take the last row of its
+# first contiguous block (where reading_id is consecutive).
 labeled_rows = []
 for mode in ["bearing_wear", "cavitation"]:
-    mode_idx = df.index[df["failure_mode"] == mode]
-    # peak severity ~= the last row of the first episode of that mode
-    labeled_rows.append(int(mode_idx[len(mode_idx) // 2 + 3]))
+    mode_idx = df.index[df["failure_mode"] == mode].to_numpy()
+    first_break = np.where(np.diff(mode_idx) > 1)[0]     # end of the first episode
+    end_of_first = mode_idx[first_break[0]] if len(first_break) else mode_idx[-1]
+    labeled_rows.append(int(end_of_first))               # peak-severity row
 labeled_rows = labeled_rows[:N_LABELED]
 df.loc[labeled_rows, "is_labeled"] = 1
 
