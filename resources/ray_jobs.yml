@@ -1,3 +1,5 @@
+# Spark vs Ray heterogeneous-NLP benchmark (notebooks/ray/05 and 06). Both jobs run on
+# an identical single-node GPU cluster; only the notebook differs.
 resources:
   jobs:
     spark_vs_ray_base:
@@ -19,7 +21,7 @@ resources:
         - task_key: demo
           job_cluster_key: gpu_single_node
           notebook_task:
-            notebook_path: ../notebooks/spark_vs_ray/heterogeneous_nlp_demo_base.py
+            notebook_path: ../notebooks/ray/05_spark_vs_ray_base.py
 
     spark_vs_ray_optimized:
       name: "[${bundle.target}] Spark vs Ray — optimized"
@@ -40,4 +42,4 @@ resources:
         - task_key: demo
           job_cluster_key: gpu_single_node
           notebook_task:
-            notebook_path: ../notebooks/spark_vs_ray/heterogeneous_nlp_demo_optimized.py
+            notebook_path: ../notebooks/ray/06_spark_vs_ray_optimized.py

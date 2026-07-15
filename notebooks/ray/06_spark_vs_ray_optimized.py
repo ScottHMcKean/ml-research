@@ -15,7 +15,7 @@
 # MAGIC   GPU returns to forward passes instead of doing list-comprehension
 # MAGIC   work between batches.
 # MAGIC
-# MAGIC Pair with `heterogeneous_nlp_demo_base` to see what each optimization
+# MAGIC Pair with `05_spark_vs_ray_base` to see what each optimization
 # MAGIC actually buys.
 # MAGIC
 # MAGIC | Stage              | Bound | Work                                              |

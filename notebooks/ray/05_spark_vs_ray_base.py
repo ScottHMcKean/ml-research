@@ -13,7 +13,7 @@
 # MAGIC | aggregate     | CPU   | per-doc summary (entity counts, mean score, etc.) |
 # MAGIC
 # MAGIC This is the straightforward shape. The optimized variant in
-# MAGIC `heterogeneous_nlp_demo_optimized` swaps stage 2 for `mapInPandas`
+# MAGIC `06_spark_vs_ray_optimized` swaps stage 2 for `mapInPandas`
 # MAGIC on the Spark side and defers per-doc unpacking off the GPU actor on
 # MAGIC the Ray side.
 # MAGIC

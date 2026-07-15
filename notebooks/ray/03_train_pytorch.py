@@ -1,9 +1,15 @@
 # Databricks notebook source
-# MAGIC %pip install lightning deltalake ray[default]==2.22.0
+# MAGIC %md
+# MAGIC # Ray Train — Distributed PyTorch Lightning
+# MAGIC Distributed image classification with **Ray Train** + PyTorch Lightning. Reads the
+# MAGIC `databricks-datasets` flowers Delta table as an `IterableDataset`, trains a small
+# MAGIC CNN across a Ray-on-Spark cluster with `RayDDPStrategy`, and logs to MLflow.
+# MAGIC
+# MAGIC Run on a **GPU ML cluster**. All paths derive from the current user — no manual edits.
 
 # COMMAND ----------
 
-# MAGIC %pip install  git+https://github.com/delta-incubator/deltatorch
+# MAGIC %pip install lightning deltalake ray[default]==2.22.0 git+https://github.com/delta-incubator/deltatorch
 
 # COMMAND ----------
 
@@ -230,9 +236,8 @@ scaling_config = ScalingConfig(num_workers=2, use_gpu=False)
 
 from ray.train import RunConfig
 
-# Local path (/some/local/path/unique_run_name)
-run_config = RunConfig(storage_path="/dbfs/Users/sriharsha.jana@databricks.com/ray-torch-lightning", 
-                       name="flower_train_run_two")
+run_config = RunConfig(storage_path=f"/dbfs/Users/{username}/ray-torch-lightning",
+                       name="flower_train_run")
 
 # COMMAND ----------
 
@@ -252,7 +257,7 @@ setup_ray_cluster(
   num_worker_nodes=2,
   num_cpus_per_node=4,
   num_gpu_per_node=1,
-  collect_log_to_path="/dbfs/Users/sriharsha.jana@databricks.com/ray_collected_logs"
+  collect_log_to_path=f"/dbfs/Users/{username}/ray_collected_logs"
 )
 ray.init()
 ray.cluster_resources()
@@ -260,14 +265,7 @@ ray.cluster_resources()
 # COMMAND ----------
 
 result = trainer.fit()
-
-# COMMAND ----------
-
-result = trainer.fit()
-
-# COMMAND ----------
-
-result
+print(result)
 
 # COMMAND ----------
 

@@ -1,4 +1,14 @@
 # Databricks notebook source
+# MAGIC %md
+# MAGIC # Ray Train — Distributed TensorFlow / Keras
+# MAGIC Distributed MNIST training with **Ray Train** + Keras `MultiWorkerMirroredStrategy`
+# MAGIC across a Ray-on-Spark cluster. Checkpoints to a DBFS user path, then reloads the
+# MAGIC saved model. CPU by default — flip `use_gpu` for a GPU cluster.
+# MAGIC
+# MAGIC All paths derive from the current user, so it runs with no manual edits.
+
+# COMMAND ----------
+
 # MAGIC %pip install -U pyarrow "ray[default]>=2.3.0"
 
 # COMMAND ----------
@@ -23,7 +33,7 @@ from ray.util.spark import setup_ray_cluster, shutdown_ray_cluster, MAX_NUM_WORK
 setup_ray_cluster(
   num_worker_nodes=2,
   num_cpus_per_node=4,
-  collect_log_to_path="/dbfs/Users/scott.mckean@databricks.com/ray_collected_logs"
+  collect_log_to_path=f"/dbfs/Users/{username}/ray_collected_logs"
 )
 
 # COMMAND ----------
@@ -119,10 +129,10 @@ def train_func(config: dict):
 
 # COMMAND ----------
 
-num_workers :int=2
-epochs :int=1
-use_gpu :bool=False
-storage_path :str= "/Volumes/uc_demos_sriharsha_jana/test_db/shjdata/tf_ray_mnist"
+num_workers: int = 2
+epochs: int = 1
+use_gpu: bool = False
+storage_path: str = f"/dbfs/Users/{username}/tf_ray_mnist"
 
 config = {"lr": 1e-3, 
           "batch_size": 64, 
