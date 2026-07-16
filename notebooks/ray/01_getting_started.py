@@ -1,4 +1,14 @@
 # Databricks notebook source
+# MAGIC %md
+# MAGIC # Getting Started with Ray on Databricks
+# MAGIC A minimal Ray primer: start a Ray-on-Spark cluster (head node only) and use a
+# MAGIC `@ray.remote` task to estimate π by Monte Carlo — first one task, then fanned out
+# MAGIC across thousands. The "hello world" before the training and tuning notebooks.
+# MAGIC
+# MAGIC Runs on **Serverless** (env v5) or any cluster.
+
+# COMMAND ----------
+
 # /// script
 # [tool.databricks.environment]
 # environment_version = "5"
