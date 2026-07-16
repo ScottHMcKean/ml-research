@@ -1,0 +1,50 @@
+resources:
+  jobs:
+    anomaly_detection_pipeline:
+      name: "[${bundle.target}] Rare-Failure Anomaly Detection — PCA + AutoEncoder"
+      max_concurrent_runs: 1
+      # Fully serverless (environment_version 5), no cloud-specific node types.
+      # The AutoEncoder task runs on a serverless GPU (A10); the rest are CPU serverless.
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: "5"
+            dependencies:
+              - scikit-learn
+              - matplotlib
+              - mlflow
+        - environment_key: gpu
+          spec:
+            environment_version: "5"
+
+      tasks:
+        - task_key: data_prep
+          environment_key: serverless
+          notebook_task:
+            notebook_path: ../notebooks/anomaly_detection/00_data_prep.py
+
+        - task_key: pca_anomaly
+          depends_on:
+            - task_key: data_prep
+          environment_key: serverless
+          notebook_task:
+            notebook_path: ../notebooks/anomaly_detection/01_pca_anomaly.py
+
+        - task_key: autoencoder_anomaly
+          depends_on:
+            - task_key: data_prep
+          # Serverless GPU: env v5 + task-level A10 accelerator. The notebook pip-installs
+          # torch on the CUDA node and trains on GPU.
+          environment_key: gpu
+          compute:
+            hardware_accelerator: GPU_1xA10
+          notebook_task:
+            notebook_path: ../notebooks/anomaly_detection/02_autoencoder_anomaly.py
+
+        - task_key: compare
+          depends_on:
+            - task_key: pca_anomaly
+            - task_key: autoencoder_anomaly
+          environment_key: serverless
+          notebook_task:
+            notebook_path: ../notebooks/anomaly_detection/03_compare.py
