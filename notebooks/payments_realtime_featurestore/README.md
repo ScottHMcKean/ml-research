@@ -21,8 +21,9 @@ reference, not tied to any company.
 Diagrams are authored in [**D2**](https://d2lang.com) — the `.d2` sources are the
 version-controllable, editable artifacts; rendered `.svg`s are committed alongside. See
 [`docs/architecture/`](docs/architecture/): `01_solution`, `02_feature_topology`
-(feature topology & cache feed-forward), and `03_latency_path` (request-time sequence).
-Re-render with `d2 <file>.d2 <file>.svg`.
+(feature topology, cache feed-forward & cadence tiers), `03_latency_path` (request-time
+sequence), and `04_kafka_realtime` (Kafka consume → score → produce). Re-render with
+`d2 <file>.d2 <file>.svg`.
 
 ## What maps to what
 
@@ -35,7 +36,9 @@ Re-render with `d2 <file>.d2 <file>.svg`.
 | Serve + auto feature lookup | `05_serving.py` |
 | Profile online performance | `06_benchmark.py` — p50/p90/p99, throughput |
 | Cache daily/monthly + feed forward | `02` (initial) + `08_backfill_cache.py` (scheduled) |
-| Hot 1h counters | `07_streaming_counters.py` |
+| Hot 1h counters (5-min batch) | `07_streaming_counters.py` |
+| Hot 1h counters (30-s streaming) | `07b_streaming_counters_rt.py` |
+| Kafka consume → score → produce | `09_kafka_io.py` |
 | Cost-effective generator + backfill + dashboard | `app/` (FastAPI Databricks App) |
 
 ### Caching & "feed forward"
@@ -50,6 +53,49 @@ Uses `databricks-feature-engineering` → `FeatureEngineeringClient` and the **L
 Feature Store** (`create_online_store` / `publish_table`). It deliberately avoids the legacy
 `FeatureStoreClient` and `OnlineTableSpec`/online tables (no longer supported), and replaces
 the original sample's external Redis hot-cache with Lakebase.
+
+## Answering the three architecture questions
+
+The sample is built to answer three questions that come up on every real-time payments
+engagement. **Freshness** (how stale a feature is when scored) and **decision latency**
+(how fast the block/pass round-trip is) are separate axes — keep them distinct.
+
+### 1 · Can 30-second burst features run through Lakebase, or do they need Spark Real-Time Mode?
+
+They run through Lakebase — **no RTM needed for a 30-second refresh**. The batch path
+(`07`, 5-min cron) is the cheap default; the streaming path (`07b`,
+`trigger(processingTime="30 seconds")` → short-interval `TRIGGERED` publish) meets a 30-s
+freshness SLA on standard GA Structured Streaming, serverless, no always-on cluster.
+`CONTINUOUS` publish is push-based (~10–20 s freshness, ~15-s minimum) but costlier and
+overkill for 30 s. Reach for **RTM** (~5 ms floor, dedicated slots) only when a *feature* or
+the *per-transaction decision* must be sub-second — see `09_kafka_io`.
+
+### 2 · Mixed refresh frequencies (monthly → 30 s): supported, and what compute per tier?
+
+Yes — each feature table publishes independently into **one** Lakebase online store, and the
+model's `FeatureLookup` set assembles across all of them at serving time. Pick the cheapest
+compute per tier:
+
+| Tier | Cadence | Compute | Publish to Lakebase | Notebook |
+|------|---------|---------|---------------------|----------|
+| Profile / monthly / weekly | scheduled | serverless job (or Lakeflow pipeline, triggered) | `TRIGGERED` snapshot | `08` |
+| Daily / hourly | scheduled | serverless job (triggered) | `TRIGGERED` | `08` |
+| **30-second burst** | streaming | serverless Structured Streaming (`processingTime=30s`); RTM only if sub-second | short-interval `TRIGGERED` (or `CONTINUOUS`) | `07b` |
+
+Prefer serverless + triggered everywhere you can (pay per run, minute granularity); an
+always-on classic cluster is justified only for sub-second RTM when serverless RTM isn't an
+option. One Lakebase Autoscaling store absorbs every cadence; size Capacity Units to read QPS.
+
+### 3 · What does a Kafka-based integration look like (consume txns, write results back)?
+
+`09_kafka_io.py` shows the full shape: `readStream.format("kafka")` (UC service credential /
+mTLS / SASL / MSK IAM auth variants) → assemble features → `foreachBatch` scores against the
+serving endpoint → `writeStream.format("kafka")` produces decisions to the outbound topic. It
+also sketches the **Streaming Declarative Features** preview alternative (Kafka → serverless
+SDP → Lakebase, `create_feature`, p95 <0.5 s; JSON only at launch, Count/Avg/Sum/StddevPop
+aggregations, rolling windows ≤ 1 week). The real go/no-go for a payments deployment is
+**on-prem/PCI networking** (NCC/PrivateLink for serverless, VPC peering for classic) and the
+round-trip it adds to the fraud SLA — measure it early. See `docs/architecture/04_kafka_realtime`.
 
 ## Deploy & run
 
@@ -68,7 +114,8 @@ databricks bundle deploy -t dev --var="payments_warehouse_id=<warehouse-id>"
 databricks bundle run payments_setup_and_train -t dev
 
 # 4. (optional) run the hot-counter refresh / cache backfill on demand
-databricks bundle run payments_counters_refresh -t dev   # also scheduled every 5 min
+databricks bundle run payments_counters_refresh -t dev      # 5-min batch (scheduled every 5 min)
+databricks bundle run payments_counters_refresh_rt -t dev   # 30-s streaming path (run_mode=once)
 databricks bundle run payments_backfill_cache -t dev
 ```
 
@@ -91,5 +138,6 @@ warms the endpoint before measuring.)
 
 ## Notebooks
 `00_setup` (shared constants) · `01_seed_data` · `02_feature_engineering` · `03_online_store`
-· `04_train_register` · `05_serving` · `06_benchmark` · `07_streaming_counters` ·
-`08_backfill_cache`.
+· `04_train_register` · `05_serving` · `06_benchmark` · `07_streaming_counters` (5-min batch)
+· `07b_streaming_counters_rt` (30-s streaming) · `08_backfill_cache` · `09_kafka_io`
+(Kafka consume → score → produce).

@@ -62,7 +62,7 @@ resources:
               grain: both
 
     payments_counters_refresh:
-      name: "[${bundle.target}] Payments — Counter refresh (hot path)"
+      name: "[${bundle.target}] Payments — Counter refresh (hot path, 5-min batch)"
       schedule:
         quartz_cron_expression: "0 */5 * * * ?"   # every 5 minutes
         timezone_id: UTC
@@ -71,6 +71,34 @@ resources:
         - task_key: counters
           notebook_task:
             notebook_path: ../notebooks/payments_realtime_featurestore/07_streaming_counters.py
+
+    # 30-second streaming counter path (answers the burst-feature freshness question).
+    # Deployed unscheduled and in run_mode=once so a bundle run / CI drains one micro-batch
+    # and stops. For a live 30-s hot path, set run_mode=continuous and run it as an
+    # always-running job (a continuous serverless stream), not a cron.
+    payments_counters_refresh_rt:
+      name: "[${bundle.target}] Payments — Counter refresh (hot path, 30-s streaming)"
+      tasks:
+        - task_key: counters_rt
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/07b_streaming_counters_rt.py
+            base_parameters:
+              run_mode: once
+              trigger_seconds: "30"
+
+    # Kafka consume -> score -> produce reference. Inert unless kafka_bootstrap is set, so it
+    # is safe to deploy; provide a broker at run time to activate it.
+    payments_kafka_io:
+      name: "[${bundle.target}] Payments — Kafka consume, score, produce"
+      tasks:
+        - task_key: kafka_io
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/09_kafka_io.py
+            base_parameters:
+              kafka_bootstrap: ""
+              topic_in: transactions
+              topic_out: decisions
+              auth: uc_service_credential
 
   apps:
     payments_app:
