@@ -64,5 +64,5 @@ dbx.write -> net: decisions { style.stroke: "#1B3139" }
 net -> onprem.kout: { style.stroke: "#1B3139" }
 
 note: |md
-  **Freshness vs. decision latency** — a streaming aggregation lands in a Delta feature table that Lakebase auto-syncs via **CONTINUOUS** publish (no FE client in the hot loop); run the scoring stream in **Real-Time Mode** for sub-second per-transaction decisions. Measure the on-prem round-trip early — it is the true SLA gate.
+  **Freshness vs. decision latency** — a streaming aggregation lands in a Delta feature table that Lakebase auto-syncs via **CONTINUOUS** publish (no FE client in the hot loop); run the scoring stream in **Real-Time Mode** for sub-second per-transaction decisions. For on-prem brokers, measure the network round-trip early — it often gates the SLA.
 | { near: bottom-center; style: { font-size: 13; font-color: "#1B3139"; fill: "#FBFAF8" } }

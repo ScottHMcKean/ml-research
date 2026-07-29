@@ -2,8 +2,10 @@
 
 A cost-effective control plane for the demo:
 
-* **Generator** — a background loop that synthesizes payment events and inserts them
-  into the raw Unity Catalog table (a cheap stand-in for a Kafka/Kinesis source).
+* **Generator** — a background loop that synthesizes payment events and emits them to one
+  of two sinks: a **Kafka topic** when `KAFKA_BOOTSTRAP` is set (the app becomes the
+  transaction producer for the streaming pipeline in `09_kafka_io`), otherwise the raw
+  Unity Catalog table via the SQL warehouse.
 * **Scorer** (`/score`) — Stage-0 deterministic rule pre-filter (with an optional direct
   Lakebase counter lookup) followed by the LightGBM serving endpoint, which auto-joins
   online features. Per-request latency is recorded.
@@ -13,10 +15,16 @@ A cost-effective control plane for the demo:
 
 Auth uses the app's injected service principal (`WorkspaceClient()` reads
 DATABRICKS_CLIENT_ID/SECRET/HOST). Resource keys are injected as env vars by app.yaml.
+
+Kafka config (all optional; set `KAFKA_BOOTSTRAP` to enable the Kafka sink):
+  KAFKA_BOOTSTRAP  comma-separated host:port list of brokers
+  KAFKA_TOPIC      topic to produce transactions to (default "transactions")
+  KAFKA_SASL_USERNAME / KAFKA_SASL_PASSWORD  optional SASL_SSL/SCRAM-SHA-512 credentials
 """
 from __future__ import annotations
 
 import os
+import json
 import time
 import math
 import uuid
@@ -32,12 +40,19 @@ from pydantic import BaseModel
 from databricks.sdk import WorkspaceClient
 
 # ---------------------------------------------------------------------------- config
-CATALOG = os.getenv("CATALOG", "shm_skunkworks_catalog")
+CATALOG = os.getenv("CATALOG", "shm_catalog")
 SCHEMA = os.getenv("SCHEMA", "payments")
 RAW_EVENTS = f"{CATALOG}.{SCHEMA}.raw_events"
 SERVING_ENDPOINT = os.getenv("SERVING_ENDPOINT", "payments-scoring")
 WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID")
 BACKFILL_JOB_ID = os.getenv("BACKFILL_JOB_ID")
+
+# Kafka sink (optional): when KAFKA_BOOTSTRAP is set the generator produces to this topic
+# instead of inserting into the raw UC table.
+KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "").strip()
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "transactions")
+KAFKA_SASL_USERNAME = os.getenv("KAFKA_SASL_USERNAME", "").strip()
+KAFKA_SASL_PASSWORD = os.getenv("KAFKA_SASL_PASSWORD", "").strip()
 
 w = WorkspaceClient()
 
@@ -96,16 +111,65 @@ def insert_events(events: list[dict]) -> None:
     w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=stmt, wait_timeout="30s")
 
 
+# --------------------------------------------------------------------- Kafka producer
+_producer = None
+_producer_lock = threading.Lock()
+
+
+def _get_producer():
+    """Lazily create a singleton Kafka producer from the KAFKA_* env vars.
+
+    Uses confluent-kafka. SASL_SSL/SCRAM-SHA-512 is enabled when a username+password are
+    provided (typical for a managed bus); otherwise a plaintext connection is used, which
+    suits a local/dev broker. Returns None when KAFKA_BOOTSTRAP is unset.
+    """
+    global _producer
+    if not KAFKA_BOOTSTRAP:
+        return None
+    if _producer is None:
+        with _producer_lock:
+            if _producer is None:
+                from confluent_kafka import Producer
+                conf = {"bootstrap.servers": KAFKA_BOOTSTRAP}
+                if KAFKA_SASL_USERNAME and KAFKA_SASL_PASSWORD:
+                    conf.update({
+                        "security.protocol": "SASL_SSL",
+                        "sasl.mechanisms": "SCRAM-SHA-512",
+                        "sasl.username": KAFKA_SASL_USERNAME,
+                        "sasl.password": KAFKA_SASL_PASSWORD,
+                    })
+                _producer = Producer(conf)
+    return _producer
+
+
+def send_events(events: list[dict]) -> None:
+    """Produce a batch of events to the Kafka topic, keyed by instrument_id."""
+    producer = _get_producer()
+    if producer is None:
+        return
+    for e in events:
+        producer.produce(KAFKA_TOPIC, key=e["instrument_id"], value=json.dumps(e))
+    producer.flush(10)
+
+
+def emit_events(events: list[dict]) -> None:
+    """Send events to the active sink: Kafka topic when configured, else the raw UC table."""
+    if KAFKA_BOOTSTRAP:
+        send_events(events)
+    else:
+        insert_events(events)
+
+
 def _generator_loop(rate_per_sec: int, batch: int):
     global _events_generated
     while not _gen_stop.is_set():
         events = [synth_event() for _ in range(batch)]
         try:
-            insert_events(events)
+            emit_events(events)
             with _lock:
                 _events_generated += len(events)
         except Exception as exc:  # keep the loop alive on transient errors
-            print(f"generator insert failed: {exc}")
+            print(f"generator emit failed: {exc}")
         time.sleep(max(0.1, batch / max(1, rate_per_sec)))
 
 
@@ -203,6 +267,7 @@ def metrics():
         "blocked_by_rules": blocked,
         "latency_ms": {"p50": pct(50), "p90": pct(90), "p99": pct(99), "samples": n},
         "generator_running": bool(_gen_thread and _gen_thread.is_alive()),
+        "sink": f"kafka:{KAFKA_TOPIC}" if KAFKA_BOOTSTRAP else "uc_table",
     }
 
 
@@ -218,7 +283,7 @@ def dashboard():
  .big{font-size:2rem;font-weight:700} pre{background:#161b22;padding:1rem;border-radius:8px}
 </style></head><body>
 <h1>Payments Real-Time Feature Store</h1>
-<p>Generator → raw table → feature store (Lakebase online) → LightGBM serving with automatic feature lookup.</p>
+<p>Generator → Kafka topic or raw table → feature store (Lakebase online) → LightGBM serving with automatic feature lookup.</p>
 <div>
  <button onclick="call('/generate?rate_per_sec=20&batch=20','POST')">Start generator</button>
  <button onclick="call('/generate?stop=true','POST')">Stop generator</button>
@@ -248,4 +313,5 @@ setInterval(refresh,2000); refresh();
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "endpoint": SERVING_ENDPOINT}
+    return {"status": "ok", "endpoint": SERVING_ENDPOINT,
+            "sink": f"kafka:{KAFKA_TOPIC}" if KAFKA_BOOTSTRAP else "uc_table"}

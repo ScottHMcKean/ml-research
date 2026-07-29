@@ -23,7 +23,7 @@
 # MAGIC    store (works today, fully GA, maximum control). Keep the Feature Engineering client
 # MAGIC    **out** of `foreachBatch`: on serverless the closure runs in an isolated worker with
 # MAGIC    no auth, so publishing belongs to a driver-side `fe.publish_table(..., CONTINUOUS)`
-# MAGIC    or the synced-table pipeline — not inside the stream. (See `07b` for the same lesson.)
+# MAGIC    or the synced-table pipeline — not inside the stream. (`07` handles the same constraint.)
 # MAGIC 2. **Streaming Declarative Features** (Kafka → serverless SDP → Lakebase, Public Preview
 # MAGIC    mid-2026) — you declare `create_feature(...)` over the Kafka source and Databricks
 # MAGIC    runs the pipeline. p95 freshness <0.5 s. See the preview block near the bottom and the
@@ -155,7 +155,7 @@ else:
 # MAGIC end-to-end Kafka-to-Kafka latency toward a ~5 ms floor. Use the `processingTime` trigger
 # MAGIC below when ~seconds of decision latency is acceptable (cheaper, no dedicated slots).
 # MAGIC
-# MAGIC > **Compute / auth note (same lesson as `07b`):** a `foreachBatch` closure runs in an
+# MAGIC > **Compute / auth note (same constraint as `07`):** a `foreachBatch` closure runs in an
 # MAGIC > isolated worker. On serverless (Spark Connect) that worker has **no default
 # MAGIC > credentials**, so a bare `WorkspaceClient()` fails with *"cannot configure default
 # MAGIC > credentials."* Run this scoring stream on **classic compute** (where the worker
@@ -270,11 +270,11 @@ else:
 # MAGIC )
 # MAGIC ```
 # MAGIC
-# MAGIC ### On-prem / PCI networking (Moneris)
-# MAGIC The genuine go/no-go for a cloud path isn't the feature tech — it's reaching an on-prem,
-# MAGIC PCI-scoped Kafka broker and the round-trip it adds to the fraud SLA:
+# MAGIC ### On-prem / PCI networking
+# MAGIC When the broker is on-prem or PCI-scoped, the network path and its round-trip latency
+# MAGIC often gate the architecture more than the feature technology does:
 # MAGIC - **Serverless → on-prem broker:** Network Connectivity Config (NCC) + PrivateLink.
 # MAGIC - **Classic compute → on-prem broker:** VPC peering / Private Service Connect.
 # MAGIC - Prefer **mTLS**; keep all secrets in **UC secret scopes**.
-# MAGIC - **Measure the round-trip early.** If the cloud hop to on-prem Kafka blows the fraud
-# MAGIC   SLA, inference shifts on-prem regardless of the feature technology.
+# MAGIC - Measure the cloud-to-broker round-trip early. If it exceeds the scoring SLA,
+# MAGIC   inference belongs on-prem regardless of the feature technology.

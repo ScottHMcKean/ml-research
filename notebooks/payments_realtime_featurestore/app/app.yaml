@@ -14,3 +14,9 @@ env:
     valueFrom: sql-warehouse
   - name: BACKFILL_JOB_ID
     valueFrom: backfill-job
+  # Kafka sink (optional): set KAFKA_BOOTSTRAP to make the generator produce to a topic
+  # instead of the raw UC table. Leave blank to use the UC-table sink.
+  - name: KAFKA_BOOTSTRAP
+    value: ""
+  - name: KAFKA_TOPIC
+    value: transactions

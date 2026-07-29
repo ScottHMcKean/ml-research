@@ -2,3 +2,4 @@ fastapi
 uvicorn[standard]
 pydantic>=2
 databricks-sdk
+confluent-kafka

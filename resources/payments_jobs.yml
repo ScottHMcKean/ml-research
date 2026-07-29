@@ -77,6 +77,7 @@ resources:
               catalog: ${var.payments_catalog}
               grain: both
 
+    # Batch hot path: one full recompute per run, driven by the 5-minute schedule.
     payments_counters_refresh:
       name: "[${bundle.target}] Payments — Counter refresh (hot path, 5-min batch)"
       schedule:
@@ -89,18 +90,20 @@ resources:
             notebook_path: ../notebooks/payments_realtime_featurestore/07_streaming_counters.py
             base_parameters:
               catalog: ${var.payments_catalog}
+              mode: batch
 
-    # 30-second hot path (answers the burst-feature freshness question). Deployed unscheduled
-    # with max_ticks=1 so a bundle run / CI does a single refresh and stops. For a live 30-s
-    # hot path, set max_ticks=0 and run it as an always-running continuous job.
+    # 30-second hot path: same notebook in loop mode. Deployed unscheduled with max_ticks=1 so
+    # a bundle run / CI does a single refresh and stops. For a live 30-s hot path, set
+    # max_ticks=0 and run it as an always-running continuous job.
     payments_counters_refresh_rt:
       name: "[${bundle.target}] Payments — Counter refresh (hot path, 30-s loop)"
       tasks:
         - task_key: counters_rt
           notebook_task:
-            notebook_path: ../notebooks/payments_realtime_featurestore/07b_streaming_counters_rt.py
+            notebook_path: ../notebooks/payments_realtime_featurestore/07_streaming_counters.py
             base_parameters:
               catalog: ${var.payments_catalog}
+              mode: loop
               max_ticks: "1"
               trigger_seconds: "30"
 
