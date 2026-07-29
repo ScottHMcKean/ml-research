@@ -154,19 +154,44 @@ else:
 # MAGIC (`trigger(realTime=...)`, GA) instead of a `processingTime` trigger — RTM drives
 # MAGIC end-to-end Kafka-to-Kafka latency toward a ~5 ms floor. Use the `processingTime` trigger
 # MAGIC below when ~seconds of decision latency is acceptable (cheaper, no dedicated slots).
+# MAGIC
+# MAGIC > **Compute / auth note (same lesson as `07b`):** a `foreachBatch` closure runs in an
+# MAGIC > isolated worker. On serverless (Spark Connect) that worker has **no default
+# MAGIC > credentials**, so a bare `WorkspaceClient()` fails with *"cannot configure default
+# MAGIC > credentials."* Run this scoring stream on **classic compute** (where the worker
+# MAGIC > inherits notebook auth), or, as below, construct the client with an **explicit host +
+# MAGIC > token** (from a secret scope) so it authenticates inside the worker regardless of
+# MAGIC > compute type.
 
 # COMMAND ----------
 
 from databricks.sdk import WorkspaceClient
 
+
+def _worker_workspace_client() -> WorkspaceClient:
+    """Auth that survives an isolated foreachBatch worker (see the compute/auth note above).
+
+    On classic compute a bare WorkspaceClient() inherits notebook auth. On serverless the
+    worker has no default credentials, so build the client from an explicit host + token
+    stored in a secret scope. Falls back to the default constructor when the secret is absent
+    (e.g. classic compute), so this works in both places without config churn.
+    """
+    try:
+        host = dbutils.secrets.get("payments_kafka", "workspace_host")
+        token = dbutils.secrets.get("payments_kafka", "workspace_token")
+        return WorkspaceClient(host=host, token=token)
+    except Exception:
+        return WorkspaceClient()
+
+
 def score_and_produce(batch_df, epoch_id: int) -> None:
-    rows = batch_df.select("instrument_id", "account_id", "category_code", "amount").collect()
+    rows = batch_df.select("event_id", "instrument_id", "account_id", "category_code", "amount").collect()
     if not rows:
         return
-    # Serverless (Spark Connect): build the client and get the session inside the closure —
+    # Serverless (Spark Connect): get the session from the batch DF and build the client here —
     # the foreachBatch worker has no captured spark session or notebook auth.
     spark = batch_df.sparkSession
-    w = WorkspaceClient()
+    w = _worker_workspace_client()
     records = [{
         "instrument_id": r.instrument_id, "account_id": r.account_id,
         "category_code": r.category_code, "amount": float(r.amount or 0.0),
@@ -177,7 +202,7 @@ def score_and_produce(batch_df, epoch_id: int) -> None:
     preds = resp.predictions or []
 
     decisions = [{
-        "event_id": rows[i].instrument_id,  # echo a correlation key back to the bus
+        "event_id": rows[i].event_id,  # carry the inbound event id through as the correlation key
         "account_id": rows[i].account_id,
         "decision": "blocked" if float(preds[i]) >= 0.5 else "pass",
         "model_output": float(preds[i]),

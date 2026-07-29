@@ -58,7 +58,11 @@ from pyspark.sql import functions as F
 from databricks.feature_engineering import FeatureEngineeringClient
 
 fe = FeatureEngineeringClient()
+# get_online_store returns None (does not raise) when the store is missing; fail fast with a
+# clear message rather than a confusing NoneType error inside the refresh loop.
 store = fe.get_online_store(name=ONLINE_STORE)
+if store is None:
+    raise RuntimeError(f"Online store '{ONLINE_STORE}' not found — run 03_online_store first.")
 
 # COMMAND ----------
 
