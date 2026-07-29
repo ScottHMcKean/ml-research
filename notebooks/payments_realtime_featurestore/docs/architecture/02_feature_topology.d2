@@ -32,7 +32,7 @@ ondemand: On-demand · computed in-request {
 
 hot: Hot · latest value · 30 s–5 min {
   class: group
-  c: Instrument counters\ntxn_cnt · fail_ratio · distinct_accts\n1h rolling · 5-min batch (07) or 30-s stream (07b) { class: store }
+  c: Instrument counters\ntxn_cnt · fail_ratio · distinct_accts\n1h rolling · 5-min batch (07) or 30-s loop (07b) { class: store }
 }
 
 warm: Warm · point-in-time, fed forward · daily / monthly {

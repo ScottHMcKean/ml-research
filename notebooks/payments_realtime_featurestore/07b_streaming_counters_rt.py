@@ -1,35 +1,41 @@
 # Databricks notebook source
 
 # MAGIC %md
-# MAGIC # 07b · Counter refresh (real-time streaming path)
+# MAGIC # 07b · Counter refresh (30-second hot path)
 # MAGIC
 # MAGIC The **30-second-freshness** answer. `07_streaming_counters` refreshes the hot 1h
-# MAGIC counters with a plain batch recompute on a 5-minute cron — simple, cheap, and correct
-# MAGIC when minutes of staleness are acceptable. This notebook is the alternative for
-# MAGIC **burst-detection features that must reflect events within ~30 seconds**: a continuous
-# MAGIC Structured Streaming job with `trigger(processingTime="30 seconds")` that recomputes
-# MAGIC the rolling-window counters every micro-batch and publishes them to the Lakebase
-# MAGIC online store.
+# MAGIC counters with a plain batch recompute on a **5-minute** cron — simple, cheap, correct
+# MAGIC when minutes of staleness are fine. This notebook is the alternative for
+# MAGIC **burst-detection features that must reflect events within ~30 seconds**: the same
+# MAGIC full-universe recompute, driven on a **30-second driver-side clock** and re-published to
+# MAGIC the Lakebase online store each tick.
 # MAGIC
-# MAGIC ## Why micro-batch (and not Real-Time Mode) for 30 seconds
-# MAGIC The requirement is **30-second feature freshness**, not sub-second per-event latency.
-# MAGIC A `processingTime="30 seconds"` micro-batch trigger meets that directly, on standard
-# MAGIC (GA) Structured Streaming, with **no always-on classic cluster required** (serverless
-# MAGIC streaming works). Reach for **Spark Real-Time Mode (RTM)** only when a *feature* or the
-# MAGIC *per-transaction decision* must land in sub-second time — RTM delivers a ~5 ms floor
-# MAGIC (typical p99 ~300 ms) but demands dedicated compute slots and real cost. For a 30 s
-# MAGIC counter that is the wrong altitude. See the freshness-tier table in the README.
+# MAGIC ## Why a driver-side loop, not `foreachBatch`
+# MAGIC The recompute resets *idle* instruments to 0 by recomputing over the full instrument
+# MAGIC universe, and `fe.write_table` / `fe.publish_table` are **driver-side** APIs that need
+# MAGIC the notebook's auth context. On serverless (Spark Connect) a streaming `foreachBatch`
+# MAGIC closure runs in an **isolated worker process** with no Spark session and no default
+# MAGIC credentials, so the Feature Engineering client cannot run there
+# MAGIC (`STREAMING_CONNECT_SERIALIZATION_ERROR`, then `cannot configure default credentials`).
+# MAGIC A short driver-side loop keeps every FE call on the driver where auth works — and, as
+# MAGIC `07`'s own header notes, a periodic recompute is simpler than a rate-stream clock for the
+# MAGIC same "refresh every N seconds" behavior.
 # MAGIC
-# MAGIC | Path | Trigger | Freshness | Compute | When |
+# MAGIC A true **incremental streaming aggregation** belongs with the Kafka source: the stream
+# MAGIC writes to a Delta feature table and Lakebase **`CONTINUOUS`** publish auto-syncs it
+# MAGIC (no FE client in the hot loop). See `09_kafka_io`.
+# MAGIC
+# MAGIC | Path | Cadence | Freshness | Compute | When |
 # MAGIC |------|---------|-----------|---------|------|
 # MAGIC | `07` batch | 5-min cron | ~5 min | serverless job | minutes OK, cheapest |
-# MAGIC | `07b` micro-batch (this) | `processingTime=30s` | ~30–60 s | serverless streaming | 30 s burst features |
-# MAGIC | RTM (see `09_kafka_io`) | real-time mode | sub-second | dedicated slots | per-event decisions |
+# MAGIC | `07b` loop (this) | 30-s driver loop | ~30–60 s | serverless job | 30-s burst features |
+# MAGIC | `09` stream → CONTINUOUS | micro-batch | ~10–20 s | serverless stream | incremental agg from Kafka |
+# MAGIC | RTM (see `09`) | real-time mode | sub-second | dedicated slots | per-event decisions |
 # MAGIC
-# MAGIC ## Freshness vs. window
-# MAGIC The 1h **window** (how far back a counter looks) is independent of the 30 s **trigger**
-# MAGIC (how often it recomputes). We keep the 1h rolling window and recompute it every 30 s so
-# MAGIC a burst shows up in the counter within one trigger interval.
+# MAGIC ## Why not Real-Time Mode for 30 seconds
+# MAGIC The requirement is **30-second feature freshness**, not sub-second per-event latency, so
+# MAGIC RTM (a ~5 ms floor, dedicated compute slots, real cost) is the wrong altitude. Reach for
+# MAGIC RTM only when a *feature* or the *per-transaction decision* must land sub-second.
 
 # COMMAND ----------
 
@@ -42,11 +48,12 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("trigger_seconds", "30", "Micro-batch trigger interval (seconds)")
-dbutils.widgets.dropdown("run_mode", "once", ["once", "continuous"], "once = single refresh (CI), continuous = keep running")
+dbutils.widgets.text("trigger_seconds", "30", "Refresh interval (seconds)")
+dbutils.widgets.text("max_ticks", "1", "How many refreshes to run (1 = single tick for CI; 0 = run forever)")
 TRIGGER_SECONDS = int(dbutils.widgets.get("trigger_seconds"))
-RUN_MODE = dbutils.widgets.get("run_mode")
+MAX_TICKS = int(dbutils.widgets.get("max_ticks"))
 
+import time
 from pyspark.sql import functions as F
 from databricks.feature_engineering import FeatureEngineeringClient
 
@@ -56,44 +63,18 @@ store = fe.get_online_store(name=ONLINE_STORE)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Stream the raw events
-# MAGIC `raw_events` is a Delta table, so we read it as a stream. In production this source is
-# MAGIC the payment-authorization stream itself (Kafka — see `09_kafka_io`); pointing the same
-# MAGIC aggregation at a Delta table keeps this notebook self-contained and testable.
+# MAGIC ## One refresh: recompute 1h counters over the full universe & publish
+# MAGIC Identical logic to `07`, factored into a function we call on a timer. Recomputing over
+# MAGIC the full instrument universe (not just recent rows) resets idle instruments to 0 rather
+# MAGIC than leaving stale values.
 
 # COMMAND ----------
 
-events = spark.readStream.table(RAW_EVENTS)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Per-micro-batch: recompute 1h counters over the full universe & publish
-# MAGIC We can't hold an unbounded streaming aggregation and reset idle instruments to 0 at the
-# MAGIC same time, and `fe.write_table` / `fe.publish_table` are batch APIs. So we use
-# MAGIC `foreachBatch`: each 30 s micro-batch hands us a *batch* DataFrame, and we recompute the
-# MAGIC last-hour counters over the **full instrument universe** (idle instruments reset to 0),
-# MAGIC merge into the feature table, and re-publish to Lakebase — the same logic as the batch
-# MAGIC job in `07`, driven by a streaming clock instead of a cron.
-# MAGIC
-# MAGIC > **Serverless note:** on serverless, Spark Connect forbids referencing the outer
-# MAGIC > `spark` session or the FE client from inside a `foreachBatch` closure that runs on
-# MAGIC > executors. Here the closure runs on the **driver** (Structured Streaming invokes
-# MAGIC > `foreachBatch` driver-side), so using `spark`, `fe`, and `store` is fine. Recompute
-# MAGIC > from the full table (not just `micro_df`) so idle instruments are reset to 0.
-
-# COMMAND ----------
-
-def refresh_counters(micro_df, epoch_id: int) -> None:
-    # micro_df carries only the new rows for this trigger; we ignore its contents and
-    # recompute the authoritative 1h counters from the full table so idle instruments
-    # (no activity in the last hour) are correctly reset to 0 rather than left stale.
-    if micro_df.isEmpty():
-        return
-
+def refresh_once(tick: int) -> None:
     raw = spark.read.table(RAW_EVENTS)
     cutoff = raw.agg(F.max("event_ts").alias("m")).first()["m"]
     if cutoff is None:
+        print(f"[tick {tick}] no events yet; skipping.")
         return
     recent = raw.filter(F.col("event_ts") >= F.lit(cutoff) - F.expr("INTERVAL 1 HOUR"))
 
@@ -107,6 +88,7 @@ def refresh_counters(micro_df, epoch_id: int) -> None:
         )
         .withColumn("inst_fail_ratio", F.round(F.col("inst_fail_cnt") / F.col("inst_txn_cnt"), 4))
     )
+    # Reset instruments with no recent activity to 0 by recomputing over the full universe.
     universe = raw.select("instrument_id").distinct()
     counters = (
         universe.join(agg, "instrument_id", "left")
@@ -121,33 +103,26 @@ def refresh_counters(micro_df, epoch_id: int) -> None:
         online_table_name=f"{FT_COUNTERS_1H}_online",
         publish_mode="TRIGGERED",
     )
-    print(f"[epoch {epoch_id}] refreshed + published 1h counters (idle reset to 0).")
+    print(f"[tick {tick}] refreshed + published 1h counters (idle reset to 0).")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Start the stream
-# MAGIC `run_mode=once` runs a single micro-batch and stops — ideal for CI / bundle runs.
-# MAGIC `run_mode=continuous` keeps refreshing every `trigger_seconds`; deploy it as an
-# MAGIC always-running job (or a serverless continuous job) for a live 30 s hot path.
+# MAGIC ## Run on a 30-second clock
+# MAGIC `max_ticks=1` runs a single refresh and stops — ideal for CI / bundle runs.
+# MAGIC `max_ticks=0` loops forever (every `trigger_seconds`); deploy that as a
+# MAGIC **continuous** job for a live 30-second hot path. The loop sleeps for the remainder of
+# MAGIC each interval so the cadence stays ~30 s regardless of recompute time.
 
 # COMMAND ----------
 
-checkpoint = f"{CHECKPOINT_ROOT}/counters_rt"
-
-writer = (
-    events.writeStream
-    .foreachBatch(refresh_counters)
-    .option("checkpointLocation", checkpoint)
-    .queryName("counters_rt")
-)
-
-if RUN_MODE == "continuous":
-    q = writer.trigger(processingTime=f"{TRIGGER_SECONDS} seconds").start()
-    print(f"Streaming counters every {TRIGGER_SECONDS}s (continuous). Query id: {q.id}")
-    q.awaitTermination()
-else:
-    # availableNow drains whatever is currently in the source, runs foreachBatch once, stops.
-    q = writer.trigger(availableNow=True).start()
-    q.awaitTermination()
-    print("Single refresh complete (run_mode=once).")
+tick = 0
+while True:
+    tick += 1
+    started = time.time()
+    refresh_once(tick)
+    if MAX_TICKS and tick >= MAX_TICKS:
+        print(f"Completed {tick} refresh tick(s).")
+        break
+    elapsed = time.time() - started
+    time.sleep(max(0.0, TRIGGER_SECONDS - elapsed))

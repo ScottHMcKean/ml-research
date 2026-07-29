@@ -18,8 +18,12 @@
 # MAGIC reuses the same serving endpoint (`05_serving`) with automatic online-feature lookup.
 # MAGIC
 # MAGIC ## Two ways to build the feature side
-# MAGIC 1. **This notebook** — you own the Structured Streaming aggregation and publish to the
-# MAGIC    Lakebase online store yourself (works today, fully GA, maximum control).
+# MAGIC 1. **This notebook** — you own the Structured Streaming aggregation. Write it to a Delta
+# MAGIC    feature table and let Lakebase **`CONTINUOUS`** publish auto-sync it to the online
+# MAGIC    store (works today, fully GA, maximum control). Keep the Feature Engineering client
+# MAGIC    **out** of `foreachBatch`: on serverless the closure runs in an isolated worker with
+# MAGIC    no auth, so publishing belongs to a driver-side `fe.publish_table(..., CONTINUOUS)`
+# MAGIC    or the synced-table pipeline — not inside the stream. (See `07b` for the same lesson.)
 # MAGIC 2. **Streaming Declarative Features** (Kafka → serverless SDP → Lakebase, Public Preview
 # MAGIC    mid-2026) — you declare `create_feature(...)` over the Kafka source and Databricks
 # MAGIC    runs the pipeline. p95 freshness <0.5 s. See the preview block near the bottom and the
@@ -159,6 +163,9 @@ def score_and_produce(batch_df, epoch_id: int) -> None:
     rows = batch_df.select("instrument_id", "account_id", "category_code", "amount").collect()
     if not rows:
         return
+    # Serverless (Spark Connect): build the client and get the session inside the closure —
+    # the foreachBatch worker has no captured spark session or notebook auth.
+    spark = batch_df.sparkSession
     w = WorkspaceClient()
     records = [{
         "instrument_id": r.instrument_id, "account_id": r.account_id,

@@ -40,6 +40,7 @@ dbx: Databricks streaming {
   class: group
   read: readStream(kafka)\nfrom_json / from_avro { class: compute }
   feat: Streaming aggregation\n1h rolling counters { class: compute }
+  ftbl: Delta feature table { class: store }
   score: foreachBatch\nquery serving endpoint { class: compute }
   write: writeStream(kafka)\ndecision -> value { class: compute }
 }
@@ -52,7 +53,8 @@ ep: Model Serving\nautomatic feature lookup { class: serve }
 onprem.kin -> net: transactions { style.stroke: "#1B3139" }
 net -> dbx.read: { style.stroke: "#1B3139" }
 dbx.read -> dbx.feat: { style.stroke: "#1B3139" }
-dbx.feat -> online: publish (30s / RTM) { style.stroke: "#FF3621" }
+dbx.feat -> dbx.ftbl: write agg { style.stroke: "#1B3139" }
+dbx.ftbl -> online: CONTINUOUS publish { style.stroke: "#FF3621" }
 dbx.read -> dbx.score: micro-batch { style.stroke: "#1B3139" }
 online -> ep: online lookup { style.stroke: "#FF3621" }
 dbx.score -> ep: score request { style.stroke: "#1B3139" }
@@ -62,5 +64,5 @@ dbx.write -> net: decisions { style.stroke: "#1B3139" }
 net -> onprem.kout: { style.stroke: "#1B3139" }
 
 note: |md
-  **Freshness vs. decision latency** — 30 s micro-batch keeps burst counters fresh; run the scoring stream in **Real-Time Mode** for sub-second per-transaction decisions. Measure the on-prem round-trip early — it is the true SLA gate.
+  **Freshness vs. decision latency** — a streaming aggregation lands in a Delta feature table that Lakebase auto-syncs via **CONTINUOUS** publish (no FE client in the hot loop); run the scoring stream in **Real-Time Mode** for sub-second per-transaction decisions. Measure the on-prem round-trip early — it is the true SLA gate.
 | { near: bottom-center; style: { font-size: 13; font-color: "#1B3139"; fill: "#FBFAF8" } }

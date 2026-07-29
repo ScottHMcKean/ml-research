@@ -37,7 +37,7 @@ sequence), and `04_kafka_realtime` (Kafka consume → score → produce). Re-ren
 | Profile online performance | `06_benchmark.py` — p50/p90/p99, throughput |
 | Cache daily/monthly + feed forward | `02` (initial) + `08_backfill_cache.py` (scheduled) |
 | Hot 1h counters (5-min batch) | `07_streaming_counters.py` |
-| Hot 1h counters (30-s streaming) | `07b_streaming_counters_rt.py` |
+| Hot 1h counters (30-s loop) | `07b_streaming_counters_rt.py` |
 | Kafka consume → score → produce | `09_kafka_io.py` |
 | Cost-effective generator + backfill + dashboard | `app/` (FastAPI Databricks App) |
 
@@ -63,12 +63,14 @@ engagement. **Freshness** (how stale a feature is when scored) and **decision la
 ### 1 · Can 30-second burst features run through Lakebase, or do they need Spark Real-Time Mode?
 
 They run through Lakebase — **no RTM needed for a 30-second refresh**. The batch path
-(`07`, 5-min cron) is the cheap default; the streaming path (`07b`,
-`trigger(processingTime="30 seconds")` → short-interval `TRIGGERED` publish) meets a 30-s
-freshness SLA on standard GA Structured Streaming, serverless, no always-on cluster.
-`CONTINUOUS` publish is push-based (~10–20 s freshness, ~15-s minimum) but costlier and
-overkill for 30 s. Reach for **RTM** (~5 ms floor, dedicated slots) only when a *feature* or
-the *per-transaction decision* must be sub-second — see `09_kafka_io`.
+(`07`, 5-min cron) is the cheap default; the 30-second path (`07b`) runs the same
+full-universe recompute on a **30-second driver-side loop**, re-publishing to Lakebase each
+tick. (A driver loop, not streaming `foreachBatch`: the FE publish APIs are driver-side and
+need the notebook's auth, which a serverless Spark Connect `foreachBatch` worker doesn't
+have — see `07b`'s header.) For a truly incremental aggregation, stream from Kafka into a
+Delta feature table and let Lakebase **`CONTINUOUS`** publish auto-sync it (~10–20 s, ~15-s
+minimum) — see `09_kafka_io`. Reach for **RTM** (~5 ms floor, dedicated slots) only when a
+*feature* or the *per-transaction decision* must be sub-second.
 
 ### 2 · Mixed refresh frequencies (monthly → 30 s): supported, and what compute per tier?
 
@@ -80,7 +82,7 @@ compute per tier:
 |------|---------|---------|---------------------|----------|
 | Profile / monthly / weekly | scheduled | serverless job (or Lakeflow pipeline, triggered) | `TRIGGERED` snapshot | `08` |
 | Daily / hourly | scheduled | serverless job (triggered) | `TRIGGERED` | `08` |
-| **30-second burst** | streaming | serverless Structured Streaming (`processingTime=30s`); RTM only if sub-second | short-interval `TRIGGERED` (or `CONTINUOUS`) | `07b` |
+| **30-second burst** | 30-s loop or stream | serverless job (30-s driver loop), or serverless streaming from Kafka; RTM only if sub-second | `TRIGGERED` each tick (or `CONTINUOUS` for a stream) | `07b` / `09` |
 
 Prefer serverless + triggered everywhere you can (pay per run, minute granularity); an
 always-on classic cluster is justified only for sub-second RTM when serverless RTM isn't an
@@ -115,7 +117,7 @@ databricks bundle run payments_setup_and_train -t dev
 
 # 4. (optional) run the hot-counter refresh / cache backfill on demand
 databricks bundle run payments_counters_refresh -t dev      # 5-min batch (scheduled every 5 min)
-databricks bundle run payments_counters_refresh_rt -t dev   # 30-s streaming path (run_mode=once)
+databricks bundle run payments_counters_refresh_rt -t dev   # 30-s hot path (max_ticks=1 single refresh)
 databricks bundle run payments_backfill_cache -t dev
 ```
 
@@ -139,5 +141,5 @@ warms the endpoint before measuring.)
 ## Notebooks
 `00_setup` (shared constants) · `01_seed_data` · `02_feature_engineering` · `03_online_store`
 · `04_train_register` · `05_serving` · `06_benchmark` · `07_streaming_counters` (5-min batch)
-· `07b_streaming_counters_rt` (30-s streaming) · `08_backfill_cache` · `09_kafka_io`
+· `07b_streaming_counters_rt` (30-s driver loop) · `08_backfill_cache` · `09_kafka_io`
 (Kafka consume → score → produce).
