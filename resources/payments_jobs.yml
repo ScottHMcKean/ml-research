@@ -104,6 +104,20 @@ resources:
               max_ticks: "1"
               trigger_seconds: "30"
 
+    # Feature freshness KPI: sub-second batch generator -> Delta -> aggregation -> Lakebase,
+    # reporting P10/50/90/99 of event->online freshness. Serverless.
+    payments_freshness_kpi:
+      name: "[${bundle.target}] Payments — Feature freshness KPI (P10/50/90/99)"
+      tasks:
+        - task_key: freshness_kpi
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/10_freshness_kpi.py
+            base_parameters:
+              catalog: ${var.payments_catalog}
+              rows_per_second: "200"
+              duration_seconds: "120"
+              tick_seconds: "1"
+
     # Kafka consume -> score -> produce reference. Inert unless kafka_bootstrap is set, so it
     # is safe to deploy; provide a broker at run time to activate it.
     payments_kafka_io:

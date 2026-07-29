@@ -42,6 +42,7 @@ sequence), and `04_kafka_realtime` (Kafka consume → score → produce). Re-ren
 | Hot 1h counters (5-min batch or 30-s loop) | `07_streaming_counters.py` (`mode` widget) |
 | Kafka consume → score → produce | `09_kafka_io.py` |
 | Per-stage latency walk (read → Lakebase → inference → write back) | `app/` (FastAPI Databricks App) |
+| Feature freshness KPI (P10/50/90/99) | `10_freshness_kpi.py` |
 
 ### Caching & "feed forward"
 Daily and monthly aggregates are stored in feature tables with a **timeseries column** set
@@ -101,6 +102,19 @@ aggregations, rolling windows ≤ 1 week). For on-prem or PCI-scoped brokers, ne
 (NCC/PrivateLink for serverless, VPC peering for classic) and the added round-trip often gate
 the architecture — measure it early. See `docs/architecture/04_kafka_realtime`.
 
+### Measuring freshness (the KPI behind Q1)
+
+`10_freshness_kpi.py` quantifies the Q1 freshness claim. A sub-second batch generator appends
+events to Delta (each stamped `event_ts`), a driver-side loop aggregates them and upserts to
+the Lakebase online store, and it reports the **P10/P50/P90/P99** of feature freshness =
+`(online-readable time) − (event_ts)`. It writes both the offline-write and end-to-end
+read-visible percentiles to `…payments.freshness_kpi`. On the FEVM at 200 rows/s with a 1-s
+tick: end-to-end P50 ≈ 1.4 s, P90 ≈ 1.5 s (P50 tracks the tick interval — lower `tick_seconds`
+to tighten it). This is the harness to point at any candidate refresh cadence to prove it
+meets an SLA. (On serverless it uses a driver-side batch-append generator rather than a
+background rate-source stream — Spark Connect restricts a background `writeStream` running
+alongside a driver polling loop in one process.)
+
 ## Deploy & run
 
 Prereqs: Databricks CLI ≥ 0.265.0 (you have a newer one), a workspace with **Lakebase
@@ -145,4 +159,4 @@ warms the endpoint before measuring.)
 `00_setup` (shared constants) · `01_seed_data` · `02_feature_engineering` · `03_online_store`
 · `04_train_register` · `05_serving` · `06_benchmark` · `07_streaming_counters` (5-min batch
 or 30-s loop, via `mode`) · `08_backfill_cache` · `09_kafka_io` (Kafka consume → score →
-produce).
+produce) · `10_freshness_kpi` (P10/50/90/99 feature freshness).
