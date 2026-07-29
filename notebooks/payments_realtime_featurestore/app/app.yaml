@@ -1,6 +1,6 @@
 # Databricks App configuration.
 # Resource keys referenced via `valueFrom` are wired in resources/payments_jobs.yml
-# (app resources: the serving endpoint, the SQL warehouse, and the backfill job).
+# (app resources: the serving endpoint and the backfill job).
 command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
 
 env:
@@ -10,13 +10,15 @@ env:
     value: payments
   - name: SERVING_ENDPOINT
     value: payments-scoring
-  - name: DATABRICKS_WAREHOUSE_ID
-    valueFrom: sql-warehouse
   - name: BACKFILL_JOB_ID
     valueFrom: backfill-job
-  # Kafka sink (optional): set KAFKA_BOOTSTRAP to make the generator produce to a topic
-  # instead of the raw UC table. Leave blank to use the UC-table sink.
-  - name: KAFKA_BOOTSTRAP
-    value: ""
+  # Online-store instance for the direct Lakebase point-lookup stage.
+  - name: LAKEBASE_INSTANCE
+    value: payments-online-store
+  # In-app Redpanda broker (Kafka wire protocol). Blank disables the Kafka stages.
+  - name: REDPANDA_BROKER
+    value: localhost:9092
   - name: KAFKA_TOPIC
     value: transactions
+  - name: KAFKA_TOPIC_OUT
+    value: decisions

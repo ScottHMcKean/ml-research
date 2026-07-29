@@ -1,34 +1,36 @@
 """Payments real-time feature-store demo — Databricks App (FastAPI).
 
-A cost-effective control plane for the demo:
+A self-contained, instrumented walk of the real-time scoring architecture. The app runs an
+in-process **Redpanda** broker (Kafka wire-compatible) and drives the full loop, timing each
+component from `docs/architecture/03_latency_path`:
 
-* **Generator** — a background loop that synthesizes payment events and emits them to one
-  of two sinks: a **Kafka topic** when `KAFKA_BOOTSTRAP` is set (the app becomes the
-  transaction producer for the streaming pipeline in `09_kafka_io`), otherwise the raw
-  Unity Catalog table via the SQL warehouse.
-* **Scorer** (`/score`) — Stage-0 deterministic rule pre-filter (with an optional direct
-  Lakebase counter lookup) followed by the LightGBM serving endpoint, which auto-joins
-  online features. Per-request latency is recorded.
-* **Backfill** (`/backfill`) — triggers the daily/monthly cache job (durable work runs as
-  a Job, never in the app process).
-* **Dashboard** (`/`) + **metrics** (`/metrics`) — live throughput and p50/p90/p99 latency.
+    1. READ            consume a transaction from the Kafka topic
+    2. UPDATE LAKEBASE  upsert + read the instrument's rolling counter in Lakebase (Postgres)
+    3. INFERENCE        score via the serving endpoint (LightGBM + automatic feature lookup)
+    4. WRITE BACK       produce the decision to the Kafka results topic
 
-Auth uses the app's injected service principal (`WorkspaceClient()` reads
-DATABRICKS_CLIENT_ID/SECRET/HOST). Resource keys are injected as env vars by app.yaml.
+The dashboard renders one latency gauge per stage (p50/p99), so the architecture diagram and
+the running system line up one-to-one.
 
-Kafka config (all optional; set `KAFKA_BOOTSTRAP` to enable the Kafka sink):
-  KAFKA_BOOTSTRAP  comma-separated host:port list of brokers
-  KAFKA_TOPIC      topic to produce transactions to (default "transactions")
-  KAFKA_SASL_USERNAME / KAFKA_SASL_PASSWORD  optional SASL_SSL/SCRAM-SHA-512 credentials
+Auth: the app's injected service principal (`WorkspaceClient()` reads
+DATABRICKS_CLIENT_ID/SECRET/HOST). Lakebase uses a short-lived OAuth token as the Postgres
+password (the app resource injects PGHOST/PGUSER/PGDATABASE but not PGPASSWORD).
+
+Env (app.yaml):
+  CATALOG / SCHEMA / SERVING_ENDPOINT   demo identifiers
+  LAKEBASE_INSTANCE                     online-store instance name (for the direct lookup)
+  REDPANDA_BROKER                       "localhost:9092" (in-app broker; blank disables Kafka)
 """
 from __future__ import annotations
 
 import os
 import json
 import time
-import math
 import uuid
 import random
+import shutil
+import atexit
+import subprocess
 import threading
 import datetime as dt
 from collections import deque
@@ -42,149 +44,309 @@ from databricks.sdk import WorkspaceClient
 # ---------------------------------------------------------------------------- config
 CATALOG = os.getenv("CATALOG", "shm_catalog")
 SCHEMA = os.getenv("SCHEMA", "payments")
-RAW_EVENTS = f"{CATALOG}.{SCHEMA}.raw_events"
 SERVING_ENDPOINT = os.getenv("SERVING_ENDPOINT", "payments-scoring")
-WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID")
-BACKFILL_JOB_ID = os.getenv("BACKFILL_JOB_ID")
+LAKEBASE_INSTANCE = os.getenv("LAKEBASE_INSTANCE", "payments-online-store")
 
-# Kafka sink (optional): when KAFKA_BOOTSTRAP is set the generator produces to this topic
-# instead of inserting into the raw UC table.
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "").strip()
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "transactions")
-KAFKA_SASL_USERNAME = os.getenv("KAFKA_SASL_USERNAME", "").strip()
-KAFKA_SASL_PASSWORD = os.getenv("KAFKA_SASL_PASSWORD", "").strip()
+# In-app Redpanda broker (Kafka wire protocol). Blank disables the Kafka stages.
+REDPANDA_BROKER = os.getenv("REDPANDA_BROKER", "localhost:9092").strip()
+TOPIC_IN = os.getenv("KAFKA_TOPIC", "transactions")
+TOPIC_OUT = os.getenv("KAFKA_TOPIC_OUT", "decisions")
+
+STAGES = ["read", "lakebase", "inference", "write_back"]
 
 w = WorkspaceClient()
 
 # ----------------------------------------------------------------------- in-memory state
-_latencies: deque[float] = deque(maxlen=5000)   # recent per-request ms
-_events_generated = 0
-_events_scored = 0
-_blocked_by_rules = 0
-_gen_thread: Optional[threading.Thread] = None
-_gen_stop = threading.Event()
+# Per-stage latency samples (ms) plus the end-to-end total.
+_samples: dict[str, deque] = {s: deque(maxlen=2000) for s in STAGES + ["total"]}
+_counts = {"scored": 0, "blocked": 0}
 _lock = threading.Lock()
+_pipe_thread: Optional[threading.Thread] = None
+_pipe_stop = threading.Event()
 
-CHANNELS = ["ch_1", "ch_2", "ch_3", "ch_4"]
-ITYPES = ["t1", "t2", "t3"]
-RTYPES = ["std", "pre", "comp"]
 CATS = ["A", "B", "C", "D", "E"]
 
 
-# ------------------------------------------------------------------- synthetic events
 def synth_event() -> dict:
-    amount = round(abs(random.lognormvariate(3.5, 1.2)), 2)
     return {
         "event_id": f"EVT_{uuid.uuid4().hex[:16]}",
         "instrument_id": f"INS_{random.randint(0, 49_999):06d}",
         "account_id": f"ACC_{random.randint(0, 4_999):05d}",
-        "bin_prefix": str(random.randint(400000, 559999)),
         "category_code": random.choice(CATS),
-        "amount": amount,
-        "channel": random.choices(CHANNELS, weights=[40, 30, 20, 10])[0],
-        "instrument_type": random.choice(ITYPES),
-        "request_type": random.choices(RTYPES, weights=[60, 30, 10])[0],
-        "flag_a": 1 if random.random() < 0.08 else 0,
+        "amount": round(abs(random.lognormvariate(3.5, 1.2)), 2),
     }
 
 
-def insert_events(events: list[dict]) -> None:
-    """Insert a batch of events into the raw UC table via the SQL warehouse."""
-    if not WAREHOUSE_ID:
-        return
-    now = dt.datetime.utcnow().isoformat()
-    rows = ",\n".join(
-        "(" + ", ".join([
-            f"'{e['event_id']}'", f"timestamp'{now}'", f"date'{now[:10]}'",
-            f"'{e['instrument_id']}'", f"'{e['account_id']}'", f"'{e['bin_prefix']}'",
-            f"'{e['category_code']}'", str(e["amount"]), f"'{e['channel']}'",
-            f"'{e['instrument_type']}'", f"'{e['request_type']}'", str(e["flag_a"]),
-            "'pass'", "0",
-        ]) + ")"
-        for e in events
-    )
-    stmt = (
-        f"INSERT INTO {RAW_EVENTS} (event_id, event_ts, event_date, instrument_id, "
-        f"account_id, bin_prefix, category_code, amount, channel, instrument_type, "
-        f"request_type, flag_a, outcome, blocked) VALUES {rows}"
-    )
-    w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=stmt, wait_timeout="30s")
+# --------------------------------------------------------------------- Redpanda broker
+_broker_proc: Optional[subprocess.Popen] = None
+_broker_status = "not-started"
 
 
-# --------------------------------------------------------------------- Kafka producer
-_producer = None
-_producer_lock = threading.Lock()
+def start_broker() -> Optional[str]:
+    """Start an in-process Redpanda broker in dev mode. Returns a status string.
 
-
-def _get_producer():
-    """Lazily create a singleton Kafka producer from the KAFKA_* env vars.
-
-    Uses confluent-kafka. SASL_SSL/SCRAM-SHA-512 is enabled when a username+password are
-    provided (typical for a managed bus); otherwise a plaintext connection is used, which
-    suits a local/dev broker. Returns None when KAFKA_BOOTSTRAP is unset.
+    Redpanda is a single static binary; `redpanda-console`/`rpk` aren't needed. We run it with
+    a tiny footprint suited to the App container. If the binary isn't on PATH the Kafka stages
+    stay disabled and the rest of the app still works.
     """
+    global _broker_proc
+    if not REDPANDA_BROKER:
+        return "disabled"
+    if _broker_proc and _broker_proc.poll() is None:
+        return "running"
+    rpk = shutil.which("redpanda") or shutil.which("rpk")
+    if not rpk:
+        return "binary-not-found"
+    data_dir = "/tmp/redpanda"
+    os.makedirs(data_dir, exist_ok=True)
+    # `redpanda start` with overprovisioned + small memory runs fine in a constrained container.
+    cmd = [
+        shutil.which("redpanda") or rpk, "start",
+        "--overprovisioned", "--smp", "1", "--memory", "512M",
+        "--reserve-memory", "0M", "--node-id", "0", "--check=false",
+        "--kafka-addr", f"PLAINTEXT://{REDPANDA_BROKER}",
+        "--advertise-kafka-addr", f"PLAINTEXT://{REDPANDA_BROKER}",
+    ]
+    _broker_proc = subprocess.Popen(cmd, cwd=data_dir,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    atexit.register(stop_broker)
+    # Give the broker a moment to bind the port before producers/consumers connect.
+    time.sleep(5)
+    return "running" if _broker_proc.poll() is None else "failed"
+
+
+def stop_broker() -> None:
+    global _broker_proc
+    if _broker_proc and _broker_proc.poll() is None:
+        _broker_proc.terminate()
+
+
+# --------------------------------------------------------------------- Kafka clients
+# Two interchangeable backends behind the same tiny produce/poll shape:
+#   * real Kafka (confluent-kafka) when a Redpanda/Kafka broker is actually reachable, or
+#   * an in-process queue when it is not (the Databricks Apps container has no Kafka binary,
+#     so this is the default there). The stub preserves the READ / WRITE-BACK stages and their
+#     timing; only the wire protocol differs. The 09_kafka_io notebook covers a real broker
+#     over the network.
+import queue as _queue
+
+# In-process topics: name -> Queue. Used only in stub mode.
+_stub_topics: dict[str, "_queue.Queue"] = {}
+
+
+def _use_real_kafka() -> bool:
+    return _broker_status == "running"
+
+
+class _StubProducer:
+    def produce(self, topic, key=None, value=None):
+        _stub_topics.setdefault(topic, _queue.Queue()).put(value)
+
+    def flush(self, timeout=0):
+        return 0
+
+
+class _StubMessage:
+    def __init__(self, value):
+        self._v = value
+
+    def value(self):
+        return self._v
+
+    def error(self):
+        return None
+
+
+class _StubConsumer:
+    def __init__(self, topic):
+        self._q = _stub_topics.setdefault(topic, _queue.Queue())
+
+    def poll(self, timeout=1.0):
+        try:
+            return _StubMessage(self._q.get(timeout=timeout))
+        except _queue.Empty:
+            return None
+
+    def close(self):
+        pass
+
+
+_producer = None
+
+
+def get_producer():
     global _producer
-    if not KAFKA_BOOTSTRAP:
+    if not REDPANDA_BROKER:
         return None
     if _producer is None:
-        with _producer_lock:
-            if _producer is None:
-                from confluent_kafka import Producer
-                conf = {"bootstrap.servers": KAFKA_BOOTSTRAP}
-                if KAFKA_SASL_USERNAME and KAFKA_SASL_PASSWORD:
-                    conf.update({
-                        "security.protocol": "SASL_SSL",
-                        "sasl.mechanisms": "SCRAM-SHA-512",
-                        "sasl.username": KAFKA_SASL_USERNAME,
-                        "sasl.password": KAFKA_SASL_PASSWORD,
-                    })
-                _producer = Producer(conf)
+        if _use_real_kafka():
+            from confluent_kafka import Producer
+            _producer = Producer({"bootstrap.servers": REDPANDA_BROKER})
+        else:
+            _producer = _StubProducer()
     return _producer
 
 
-def send_events(events: list[dict]) -> None:
-    """Produce a batch of events to the Kafka topic, keyed by instrument_id."""
-    producer = _get_producer()
-    if producer is None:
-        return
-    for e in events:
-        producer.produce(KAFKA_TOPIC, key=e["instrument_id"], value=json.dumps(e))
-    producer.flush(10)
+def make_consumer():
+    if not _use_real_kafka():
+        return _StubConsumer(TOPIC_IN)
+    from confluent_kafka import Consumer
+    c = Consumer({
+        "bootstrap.servers": REDPANDA_BROKER,
+        "group.id": "payments-app",
+        "auto.offset.reset": "latest",
+        "enable.auto.commit": True,
+    })
+    c.subscribe([TOPIC_IN])
+    return c
 
 
-def emit_events(events: list[dict]) -> None:
-    """Send events to the active sink: Kafka topic when configured, else the raw UC table."""
-    if KAFKA_BOOTSTRAP:
-        send_events(events)
-    else:
-        insert_events(events)
+# --------------------------------------------------------------------- Lakebase (Postgres)
+_pg_conn = None
+_pg_token_exp = 0.0
+_pg_lock = threading.Lock()
 
 
-def _generator_loop(rate_per_sec: int, batch: int):
-    global _events_generated
-    while not _gen_stop.is_set():
-        events = [synth_event() for _ in range(batch)]
-        try:
-            emit_events(events)
-            with _lock:
-                _events_generated += len(events)
-        except Exception as exc:  # keep the loop alive on transient errors
-            print(f"generator emit failed: {exc}")
-        time.sleep(max(0.1, batch / max(1, rate_per_sec)))
+def _lakebase_host() -> str:
+    """Lakebase host. The `database` app resource injects PGHOST; fall back to the SDK/REST."""
+    if os.getenv("PGHOST"):
+        return os.getenv("PGHOST")
+    # Older Apps SDKs lack w.database; hit the REST API directly with the SP token.
+    resp = w.api_client.do("GET", f"/api/2.0/database/instances/{LAKEBASE_INSTANCE}")
+    return resp["read_write_dns"]
 
 
-# --------------------------------------------------------------------- Stage-0 rules
-def stage0_rules(rec: dict) -> Optional[str]:
-    """Cheap deterministic pre-filter. Returns a rule name if it fires, else None."""
-    if rec["amount"] > 5000 and rec.get("flag_a"):
-        return "r_high_amount_flagged"
-    if rec.get("channel") == "ch_4" and rec["amount"] > 2000:
-        return "r_risky_channel_high_amount"
-    return None
+def _lakebase_token() -> str:
+    """Generate a short-lived Postgres OAuth token via REST (works on the older Apps SDK)."""
+    resp = w.api_client.do("POST", "/api/2.0/database/credentials",
+                           body={"request_id": str(uuid.uuid4()),
+                                 "instance_names": [LAKEBASE_INSTANCE]})
+    return resp["token"]
+
+
+def _pg_connect():
+    """Open a psycopg connection to the Lakebase online store using an OAuth token as the
+    password. Tokens rotate (~1h), so we cache the connection and refresh on expiry."""
+    import psycopg
+    user = os.getenv("PGUSER") or w.current_user.me().user_name
+    dbname = os.getenv("PGDATABASE", "databricks_postgres")
+    conn = psycopg.connect(host=_lakebase_host(), port=int(os.getenv("PGPORT", "5432")),
+                           dbname=dbname, user=user, password=_lakebase_token(),
+                           sslmode="require", autocommit=True)
+    with conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS latency_demo")
+        cur.execute("CREATE TABLE IF NOT EXISTS latency_demo.inst_counter ("
+                    "instrument_id text PRIMARY KEY, txn_cnt bigint, updated_at timestamptz)")
+    return conn
+
+
+def get_pg():
+    """Return a live Lakebase connection, (re)connecting when missing or the token has aged."""
+    global _pg_conn, _pg_token_exp
+    with _pg_lock:
+        if _pg_conn is None or time.time() > _pg_token_exp:
+            if _pg_conn is not None:
+                try:
+                    _pg_conn.close()
+                except Exception:
+                    pass
+            _pg_conn = _pg_connect()
+            _pg_token_exp = time.time() + 2400  # refresh well before the ~1h token expiry
+        return _pg_conn
+
+
+def lakebase_upsert_and_read(instrument_id: str) -> int:
+    """UPDATE LAKEBASE stage: bump the instrument's rolling counter and read it back."""
+    conn = get_pg()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO latency_demo.inst_counter (instrument_id, txn_cnt, updated_at) "
+            "VALUES (%s, 1, now()) "
+            "ON CONFLICT (instrument_id) DO UPDATE SET "
+            "txn_cnt = latency_demo.inst_counter.txn_cnt + 1, updated_at = now() "
+            "RETURNING txn_cnt",
+            (instrument_id,),
+        )
+        return int(cur.fetchone()[0])
+
+
+# --------------------------------------------------------------------------- the pipeline
+def _record(stage_ms: dict, total_ms: float, blocked: bool) -> None:
+    with _lock:
+        for s, v in stage_ms.items():
+            _samples[s].append(v)
+        _samples["total"].append(total_ms)
+        _counts["scored"] += 1
+        if blocked:
+            _counts["blocked"] += 1
+
+
+def score_one(consumer, producer) -> Optional[dict]:
+    """Run one transaction through all four stages, timing each. Returns a decision dict."""
+    t0 = time.perf_counter()
+
+    # 1 · READ — pull the next transaction off the inbound topic.
+    msg = consumer.poll(1.0)
+    if msg is None or msg.error():
+        return None
+    txn = json.loads(msg.value())
+    t_read = time.perf_counter()
+
+    # 2 · UPDATE LAKEBASE — upsert + read the rolling counter in the online store.
+    txn_cnt = lakebase_upsert_and_read(txn["instrument_id"])
+    t_lb = time.perf_counter()
+
+    # 3 · INFERENCE — serving endpoint with automatic online-feature lookup.
+    payload = {"instrument_id": txn["instrument_id"], "account_id": txn["account_id"],
+               "category_code": txn["category_code"], "amount": float(txn["amount"]),
+               "event_ts": dt.datetime.utcnow().isoformat()}
+    resp = w.serving_endpoints.query(name=SERVING_ENDPOINT, dataframe_records=[payload])
+    output = float(resp.predictions[0]) if resp.predictions else 0.0
+    blocked = output >= 0.5
+    t_inf = time.perf_counter()
+
+    # 4 · WRITE BACK — produce the decision to the outbound topic.
+    decision = {"event_id": txn["event_id"], "instrument_id": txn["instrument_id"],
+                "decision": "blocked" if blocked else "pass", "txn_cnt": txn_cnt,
+                "model_output": round(output, 4), "scored_at": dt.datetime.utcnow().isoformat()}
+    producer.produce(TOPIC_OUT, key=txn["instrument_id"], value=json.dumps(decision))
+    producer.flush(5)
+    t_out = time.perf_counter()
+
+    ms = lambda a, b: (b - a) * 1000.0
+    stage_ms = {"read": ms(t0, t_read), "lakebase": ms(t_read, t_lb),
+                "inference": ms(t_lb, t_inf), "write_back": ms(t_inf, t_out)}
+    _record(stage_ms, ms(t0, t_out), blocked)
+    return {**decision, "stage_ms": {k: round(v, 1) for k, v in stage_ms.items()}}
+
+
+def _pipeline_loop(rate_per_sec: int):
+    """Produce synthetic transactions and score them, end to end, until stopped."""
+    producer = get_producer()
+    consumer = make_consumer()
+    interval = 1.0 / max(1, rate_per_sec)
+    try:
+        while not _pipe_stop.is_set():
+            producer.produce(TOPIC_IN, key="k", value=json.dumps(synth_event()))
+            producer.flush(5)
+            try:
+                score_one(consumer, producer)
+            except Exception as exc:  # keep the loop alive on transient errors
+                print(f"pipeline error: {exc}")
+            time.sleep(interval)
+    finally:
+        consumer.close()
 
 
 # --------------------------------------------------------------------------- FastAPI
-app = FastAPI(title="Payments Real-Time Feature Store Demo")
+app = FastAPI(title="Payments Real-Time Feature Store — Latency Walk")
+
+
+@app.on_event("startup")
+def _startup():
+    global _broker_status
+    _broker_status = start_broker()
+    print("broker:", _broker_status, "| redpanda on PATH:", bool(shutil.which("redpanda") or shutil.which("rpk")))
 
 
 class ScoreRequest(BaseModel):
@@ -196,122 +358,159 @@ class ScoreRequest(BaseModel):
 
 @app.post("/score")
 def score(req: ScoreRequest):
-    global _events_scored, _blocked_by_rules
-    # Fill any field the caller omitted from a synthetic event, so empty or partial
-    # request bodies still produce a complete, scorable record (avoids None in the rules).
-    rec = {**synth_event(), **{k: v for k, v in req.model_dump().items() if v is not None}}
-    rec = {k: rec[k] for k in ("instrument_id", "account_id", "category_code", "amount")}
-
-    t0 = time.perf_counter()
-    # Stage 0: deterministic pre-filter (short-circuits before the model).
-    fired = stage0_rules(rec)
-    if fired:
-        with _lock:
-            _events_scored += 1
-            _blocked_by_rules += 1
-            _latencies.append((time.perf_counter() - t0) * 1000)
-        return {"decision": "blocked", "stage": "rules", "rule": fired}
-
-    # Stage 1: LightGBM with automatic online feature lookup.
-    payload = {**rec, "event_ts": dt.datetime.utcnow().isoformat()}
-    resp = w.serving_endpoints.query(name=SERVING_ENDPOINT, dataframe_records=[payload])
-    elapsed = (time.perf_counter() - t0) * 1000
-    # The fe.log_model LightGBM classifier serves the predicted class (0/1), not a
-    # calibrated probability, so report it as the model's output rather than a score.
-    output = float(resp.predictions[0]) if resp.predictions else 0.0
-    with _lock:
-        _events_scored += 1
-        _latencies.append(elapsed)
-    return {"decision": "blocked" if output >= 0.5 else "pass", "stage": "model",
-            "model_output": round(output, 4), "latency_ms": round(elapsed, 1)}
+    """Score a single transaction through all four stages and return the per-stage timings."""
+    if not REDPANDA_BROKER:
+        return JSONResponse({"error": "Kafka disabled (REDPANDA_BROKER unset)"}, status_code=400)
+    producer = get_producer()
+    consumer = make_consumer()
+    try:
+        event = {**synth_event(), **{k: v for k, v in req.model_dump().items() if v is not None}}
+        producer.produce(TOPIC_IN, key="k", value=json.dumps(event))
+        producer.flush(5)
+        # Small retry so the just-produced message is available to poll.
+        for _ in range(5):
+            out = score_one(consumer, producer)
+            if out:
+                return out
+        return JSONResponse({"error": "no message scored"}, status_code=504)
+    finally:
+        consumer.close()
 
 
 @app.post("/generate")
-def generate(rate_per_sec: int = 20, batch: int = 20, stop: bool = False):
-    global _gen_thread
+def generate(rate_per_sec: int = 10, stop: bool = False):
+    global _pipe_thread
     if stop:
-        _gen_stop.set()
-        return {"status": "stopping generator"}
-    if _gen_thread and _gen_thread.is_alive():
-        return {"status": "generator already running"}
-    _gen_stop.clear()
-    _gen_thread = threading.Thread(target=_generator_loop, args=(rate_per_sec, batch), daemon=True)
-    _gen_thread.start()
-    return {"status": "generator started", "rate_per_sec": rate_per_sec, "batch": batch}
+        _pipe_stop.set()
+        return {"status": "stopping"}
+    if _pipe_thread and _pipe_thread.is_alive():
+        return {"status": "already running"}
+    _pipe_stop.clear()
+    _pipe_thread = threading.Thread(target=_pipeline_loop, args=(rate_per_sec,), daemon=True)
+    _pipe_thread.start()
+    return {"status": "started", "rate_per_sec": rate_per_sec}
 
 
-@app.post("/backfill")
-def backfill(grain: str = "both"):
-    if not BACKFILL_JOB_ID:
-        return JSONResponse({"error": "BACKFILL_JOB_ID not configured"}, status_code=400)
-    run = w.jobs.run_now(job_id=int(BACKFILL_JOB_ID), notebook_params={"grain": grain})
-    return {"status": "backfill triggered", "run_id": run.run_id, "grain": grain}
+def _pct(vals, p):
+    if not vals:
+        return None
+    s = sorted(vals)
+    import math
+    return round(s[max(0, min(len(s) - 1, math.ceil(p / 100 * len(s)) - 1))], 1)
 
 
 @app.get("/metrics")
 def metrics():
     with _lock:
-        lat = sorted(_latencies)
-        n = len(lat)
-        gen, scored, blocked = _events_generated, _events_scored, _blocked_by_rules
-
-    def pct(p):
-        # Nearest-rank percentile: ceil(p/100 * n) - 1, clamped to [0, n-1].
-        if not n:
-            return None
-        return round(lat[max(0, min(n - 1, math.ceil(p / 100 * n) - 1))], 1)
-
+        snap = {s: list(v) for s, v in _samples.items()}
+        scored, blocked = _counts["scored"], _counts["blocked"]
+    stages = {s: {"p50": _pct(snap[s], 50), "p99": _pct(snap[s], 99), "n": len(snap[s])}
+              for s in STAGES}
     return {
-        "events_generated": gen,
-        "events_scored": scored,
-        "blocked_by_rules": blocked,
-        "latency_ms": {"p50": pct(50), "p90": pct(90), "p99": pct(99), "samples": n},
-        "generator_running": bool(_gen_thread and _gen_thread.is_alive()),
-        "sink": f"kafka:{KAFKA_TOPIC}" if KAFKA_BOOTSTRAP else "uc_table",
+        "stages": stages,
+        "total": {"p50": _pct(snap["total"], 50), "p99": _pct(snap["total"], 99)},
+        "scored": scored, "blocked": blocked,
+        "running": bool(_pipe_thread and _pipe_thread.is_alive()),
     }
-
-
-@app.get("/", response_class=HTMLResponse)
-def dashboard():
-    return """
-<!doctype html><html><head><title>Payments Feature Store Demo</title>
-<style>
- body{font-family:system-ui,sans-serif;margin:2rem;background:#0b0e14;color:#e6e6e6}
- h1{color:#ff6b6b} button{padding:.5rem 1rem;margin:.25rem;border:0;border-radius:6px;
- background:#1f6feb;color:#fff;cursor:pointer} .card{background:#161b22;padding:1rem;
- border-radius:8px;margin:.5rem 0;display:inline-block;min-width:160px}
- .big{font-size:2rem;font-weight:700} pre{background:#161b22;padding:1rem;border-radius:8px}
-</style></head><body>
-<h1>Payments Real-Time Feature Store</h1>
-<p>Generator → Kafka topic or raw table → feature store (Lakebase online) → LightGBM serving with automatic feature lookup.</p>
-<div>
- <button onclick="call('/generate?rate_per_sec=20&batch=20','POST')">Start generator</button>
- <button onclick="call('/generate?stop=true','POST')">Stop generator</button>
- <button onclick="call('/score','POST')">Score one event</button>
- <button onclick="call('/backfill?grain=both','POST')">Backfill caches</button>
-</div>
-<div id="cards"></div>
-<pre id="log"></pre>
-<script>
-async function call(url,method){
-  const r=await fetch(url,{method:method||'GET',headers:{'Content-Type':'application/json'},
-    body:method==='POST'?'{}':undefined});
-  document.getElementById('log').textContent=JSON.stringify(await r.json(),null,2);
-}
-async function refresh(){
-  const m=await (await fetch('/metrics')).json();
-  document.getElementById('cards').innerHTML=
-   card('Generated',m.events_generated)+card('Scored',m.events_scored)+
-   card('Blocked (rules)',m.blocked_by_rules)+card('p50 ms',m.latency_ms.p50)+
-   card('p99 ms',m.latency_ms.p99)+card('Generator',m.generator_running?'on':'off');
-}
-function card(t,v){return `<div class="card">${t}<div class="big">${v??'-'}</div></div>`}
-setInterval(refresh,2000); refresh();
-</script></body></html>
-"""
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "endpoint": SERVING_ENDPOINT,
-            "sink": f"kafka:{KAFKA_TOPIC}" if KAFKA_BOOTSTRAP else "uc_table"}
+    return {"status": "ok",
+            "kafka_backend": "kafka" if _use_real_kafka() else "in-process queue",
+            "broker_status": _broker_status,
+            "endpoint": SERVING_ENDPOINT}
+
+
+# --------------------------------------------------------------------------- dashboard
+STAGE_LABELS = {"read": "1 · Read (Kafka)", "lakebase": "2 · Update Lakebase",
+                "inference": "3 · Inference", "write_back": "4 · Write back (Kafka)"}
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard():
+    return _DASHBOARD_HTML
+
+
+_DASHBOARD_HTML = """
+<!doctype html><html><head><meta charset="utf-8"><title>Payments Latency Walk</title>
+<style>
+ :root{--surface:#1a1a19;--card:#232320;--ink:#ffffff;--muted:#898781;
+  --s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#9085e9;--good:#0ca30c;--crit:#d03b3b}
+ *{box-sizing:border-box} body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+  margin:0;padding:2rem;background:#0d0d0d;color:var(--ink)}
+ h1{font-size:1.4rem;margin:0 0 .25rem} p.sub{color:var(--muted);margin:.2rem 0 1.2rem}
+ button{padding:.55rem 1rem;margin:.25rem .4rem .25rem 0;border:0;border-radius:8px;
+  background:#2a2a28;color:#fff;cursor:pointer;font-size:.9rem}
+ button.primary{background:var(--s1)} button:hover{filter:brightness(1.15)}
+ .flow{display:flex;gap:.6rem;flex-wrap:wrap;margin:1.2rem 0}
+ .gauge{background:var(--card);border:1px solid rgba(255,255,255,.08);border-radius:12px;
+  padding:1rem 1.1rem;flex:1;min-width:170px}
+ .gauge .name{font-size:.85rem;color:var(--muted);margin-bottom:.5rem}
+ .gauge .p50{font-size:2rem;font-weight:700;font-variant-numeric:tabular-nums}
+ .gauge .unit{font-size:.9rem;color:var(--muted);font-weight:400}
+ .gauge .p99{font-size:.8rem;color:var(--muted);margin-top:.15rem;font-variant-numeric:tabular-nums}
+ .bar{height:6px;border-radius:3px;background:#333;margin-top:.6rem;overflow:hidden}
+ .bar > i{display:block;height:100%;border-radius:3px}
+ .arrow{align-self:center;color:var(--muted);font-size:1.3rem}
+ .totals{display:flex;gap:1.2rem;margin:.4rem 0 1rem;color:var(--muted);font-size:.9rem}
+ .totals b{color:var(--ink);font-variant-numeric:tabular-nums}
+ pre{background:var(--card);padding:1rem;border-radius:10px;color:#c3c2b7;font-size:.8rem;
+  max-height:180px;overflow:auto}
+</style></head><body>
+<h1>Payments Real-Time Feature Store — Latency Walk</h1>
+<p class="sub">Read → Lakebase → serving → write back. Each gauge is one architecture stage;
+ the number is p50 latency, the small line p99. <span id="backend"></span></p>
+<div>
+ <button class="primary" onclick="call('/generate?rate_per_sec=10','POST')">Start stream</button>
+ <button onclick="call('/generate?stop=true','POST')">Stop</button>
+ <button onclick="call('/score','POST')">Score one</button>
+</div>
+<div class="totals">
+ <div>end-to-end p50 <b id="tp50">–</b> ms</div>
+ <div>p99 <b id="tp99">–</b> ms</div>
+ <div>scored <b id="scored">0</b></div>
+ <div>blocked <b id="blocked">0</b></div>
+ <div>stream <b id="run">off</b></div>
+</div>
+<div class="flow" id="flow"></div>
+<pre id="log">Click "Score one" to walk a single transaction through the four stages.</pre>
+<script>
+const STAGES=[["read","1 · Read","var(--s1)"],["lakebase","2 · Update Lakebase","var(--s2)"],
+ ["inference","3 · Inference","var(--s3)"],["write_back","4 · Write back","var(--s4)"]];
+const flow=document.getElementById('flow');
+STAGES.forEach(([k,label,color],i)=>{
+ if(i>0){const a=document.createElement('div');a.className='arrow';a.textContent='→';flow.appendChild(a);}
+ const g=document.createElement('div');g.className='gauge';g.id='g_'+k;
+ g.innerHTML=`<div class="name">${label}</div>
+  <div class="p50"><span id="p50_${k}">–</span><span class="unit"> ms</span></div>
+  <div class="p99">p99 <span id="p99_${k}">–</span> ms</div>
+  <div class="bar"><i id="bar_${k}" style="width:0%;background:${color}"></i></div>`;
+ flow.appendChild(g);
+});
+async function call(url,method){
+ const r=await fetch(url,{method:method||'GET',headers:{'Content-Type':'application/json'},
+   body:method==='POST'?'{}':undefined});
+ document.getElementById('log').textContent=JSON.stringify(await r.json(),null,2);
+}
+async function refresh(){
+ const m=await (await fetch('/metrics')).json();
+ const max=Math.max(1,...STAGES.map(([k])=>m.stages[k].p50||0));
+ STAGES.forEach(([k])=>{
+  const st=m.stages[k];
+  document.getElementById('p50_'+k).textContent=st.p50??'–';
+  document.getElementById('p99_'+k).textContent=st.p99??'–';
+  document.getElementById('bar_'+k).style.width=((st.p50||0)/max*100)+'%';
+ });
+ document.getElementById('tp50').textContent=m.total.p50??'–';
+ document.getElementById('tp99').textContent=m.total.p99??'–';
+ document.getElementById('scored').textContent=m.scored;
+ document.getElementById('blocked').textContent=m.blocked;
+ document.getElementById('run').textContent=m.running?'on':'off';
+}
+fetch('/health').then(r=>r.json()).then(h=>{
+ document.getElementById('backend').textContent='· transport: '+h.kafka_backend;
+});
+setInterval(refresh,1500); refresh();
+</script></body></html>
+"""

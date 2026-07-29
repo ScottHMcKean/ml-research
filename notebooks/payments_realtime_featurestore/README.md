@@ -9,10 +9,13 @@ seed events → declare features → publish online (Lakebase) → train LightGB
             → serve with automatic feature lookup → benchmark latency
 ```
 
-A **Databricks App** acts as a cost-effective synthetic event generator, the scoring
-front-end (Stage-0 rules + model), the cache-backfill trigger, and a live latency
-dashboard. **All data is synthetic and all names are generic** — this is a pattern
-reference, not tied to any company.
+A **Databricks App** walks a transaction through the architecture and **times each stage**,
+rendering one latency gauge per component: **1 Read** (Kafka) → **2 Update Lakebase** (a
+direct Postgres upsert+read on the online store) → **3 Inference** (serving endpoint) →
+**4 Write back** (Kafka). It uses an in-app Kafka broker when one is reachable and an
+in-process queue otherwise (the Apps container ships no Kafka binary), so the Read/Write
+stages are always exercised; the Lakebase and inference stages are always real. **All data is
+synthetic and all names are generic** — this is a pattern reference, not tied to any company.
 
 ## Architecture
 
@@ -38,7 +41,7 @@ sequence), and `04_kafka_realtime` (Kafka consume → score → produce). Re-ren
 | Cache daily/monthly + feed forward | `02` (initial) + `08_backfill_cache.py` (scheduled) |
 | Hot 1h counters (5-min batch or 30-s loop) | `07_streaming_counters.py` (`mode` widget) |
 | Kafka consume → score → produce | `09_kafka_io.py` |
-| Cost-effective generator + backfill + dashboard | `app/` (FastAPI Databricks App) |
+| Per-stage latency walk (read → Lakebase → inference → write back) | `app/` (FastAPI Databricks App) |
 
 ### Caching & "feed forward"
 Daily and monthly aggregates are stored in feature tables with a **timeseries column** set
@@ -105,23 +108,24 @@ Prereqs: Databricks CLI ≥ 0.265.0 (you have a newer one), a workspace with **L
 bundle is part of the repo root `databricks.yml` (target `dev`, profile `DEFAULT`).
 
 ```bash
-# 1. Validate
-databricks bundle validate -t dev
+# 1. Validate (set the catalog for your workspace)
+databricks bundle validate -t dev --var="payments_catalog=<catalog>"
 
-# 2. Set the App's warehouse id (used to insert generated events), then deploy
-databricks bundle deploy -t dev --var="payments_warehouse_id=<warehouse-id>"
+# 2. Deploy
+databricks bundle deploy -t dev --var="payments_catalog=<catalog>"
 
 # 3. Run the full pipeline (seed → features → online → train → serve → benchmark)
 databricks bundle run payments_setup_and_train -t dev
 
 # 4. (optional) run the hot-counter refresh / cache backfill on demand
 databricks bundle run payments_counters_refresh -t dev      # 5-min batch (scheduled every 5 min)
-databricks bundle run payments_counters_refresh_rt -t dev   # 30-s hot path (max_ticks=1 single refresh)
+databricks bundle run payments_counters_refresh_rt -t dev   # 30-s hot path (07 in loop mode)
 databricks bundle run payments_backfill_cache -t dev
 ```
 
-The App (`payments-feature-store-demo`) deploys with the bundle; open it, click **Start
-generator**, **Score one event**, and **Backfill caches**, and watch p50/p99 update live.
+The App (`payments-feature-store-demo`) deploys with the bundle (with a `database` resource
+for the direct Lakebase lookup). Open it, click **Start stream** or **Score one**, and watch
+the per-stage latency gauges update live (read → Lakebase → inference → write back).
 
 ## Benchmark vs sample targets
 
