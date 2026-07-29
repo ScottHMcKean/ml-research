@@ -13,6 +13,9 @@ variables:
   payments_warehouse_id:
     description: SQL warehouse id the App uses to insert generated events into the raw table.
     default: ""
+  payments_catalog:
+    description: Unity Catalog catalog for the demo artifacts. Override per workspace/env.
+    default: shm_skunkworks_catalog
 
 resources:
   # The schema (shm_skunkworks_catalog.payments) and the registered model
@@ -27,26 +30,38 @@ resources:
         - task_key: seed_data
           notebook_task:
             notebook_path: ../notebooks/payments_realtime_featurestore/01_seed_data.py
+            base_parameters:
+              catalog: ${var.payments_catalog}
         - task_key: feature_engineering
           depends_on: [{task_key: seed_data}]
           notebook_task:
             notebook_path: ../notebooks/payments_realtime_featurestore/02_feature_engineering.py
+            base_parameters:
+              catalog: ${var.payments_catalog}
         - task_key: online_store
           depends_on: [{task_key: feature_engineering}]
           notebook_task:
             notebook_path: ../notebooks/payments_realtime_featurestore/03_online_store.py
+            base_parameters:
+              catalog: ${var.payments_catalog}
         - task_key: train_register
           depends_on: [{task_key: online_store}]
           notebook_task:
             notebook_path: ../notebooks/payments_realtime_featurestore/04_train_register.py
+            base_parameters:
+              catalog: ${var.payments_catalog}
         - task_key: serving
           depends_on: [{task_key: train_register}]
           notebook_task:
             notebook_path: ../notebooks/payments_realtime_featurestore/05_serving.py
+            base_parameters:
+              catalog: ${var.payments_catalog}
         - task_key: benchmark
           depends_on: [{task_key: serving}]
           notebook_task:
             notebook_path: ../notebooks/payments_realtime_featurestore/06_benchmark.py
+            base_parameters:
+              catalog: ${var.payments_catalog}
 
     payments_backfill_cache:
       name: "[${bundle.target}] Payments — Backfill daily & monthly caches"
@@ -59,10 +74,11 @@ resources:
           notebook_task:
             notebook_path: ../notebooks/payments_realtime_featurestore/08_backfill_cache.py
             base_parameters:
+              catalog: ${var.payments_catalog}
               grain: both
 
     payments_counters_refresh:
-      name: "[${bundle.target}] Payments — Counter refresh (hot path)"
+      name: "[${bundle.target}] Payments — Counter refresh (hot path, 5-min batch)"
       schedule:
         quartz_cron_expression: "0 */5 * * * ?"   # every 5 minutes
         timezone_id: UTC
@@ -71,6 +87,37 @@ resources:
         - task_key: counters
           notebook_task:
             notebook_path: ../notebooks/payments_realtime_featurestore/07_streaming_counters.py
+            base_parameters:
+              catalog: ${var.payments_catalog}
+
+    # 30-second hot path (answers the burst-feature freshness question). Deployed unscheduled
+    # with max_ticks=1 so a bundle run / CI does a single refresh and stops. For a live 30-s
+    # hot path, set max_ticks=0 and run it as an always-running continuous job.
+    payments_counters_refresh_rt:
+      name: "[${bundle.target}] Payments — Counter refresh (hot path, 30-s loop)"
+      tasks:
+        - task_key: counters_rt
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/07b_streaming_counters_rt.py
+            base_parameters:
+              catalog: ${var.payments_catalog}
+              max_ticks: "1"
+              trigger_seconds: "30"
+
+    # Kafka consume -> score -> produce reference. Inert unless kafka_bootstrap is set, so it
+    # is safe to deploy; provide a broker at run time to activate it.
+    payments_kafka_io:
+      name: "[${bundle.target}] Payments — Kafka consume, score, produce"
+      tasks:
+        - task_key: kafka_io
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/09_kafka_io.py
+            base_parameters:
+              catalog: ${var.payments_catalog}
+              kafka_bootstrap: ""
+              topic_in: transactions
+              topic_out: decisions
+              auth: uc_service_credential
 
   apps:
     payments_app:

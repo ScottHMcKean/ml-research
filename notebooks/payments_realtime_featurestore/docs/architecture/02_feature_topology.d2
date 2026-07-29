@@ -30,18 +30,18 @@ ondemand: On-demand · computed in-request {
   f: log_amount · is_night\nhigh_amount · category_ordinal { class: compute }
 }
 
-hot: Hot · latest value {
+hot: Hot · latest value · 30 s–5 min {
   class: group
-  c: Instrument counters\ntxn_cnt · fail_ratio · distinct_accts\nrefreshed every 5 min (1h rolling) { class: store }
+  c: Instrument counters\ntxn_cnt · fail_ratio · distinct_accts\n1h rolling · 5-min batch (07) or 30-s loop (07b) { class: store }
 }
 
-warm: Warm · point-in-time, fed forward {
+warm: Warm · point-in-time, fed forward · daily / monthly {
   class: group
   d: Account daily\neffective next-day 00:00 { class: store }
   m: Account monthly\neffective next-month 00:00 { class: store }
 }
 
-ref: Reference {
+ref: Reference · slow-changing {
   class: group
   p: Account profile\nis_premium · age · region · decline_rate { class: store }
 }
@@ -64,5 +64,6 @@ ondemand.f -> lgbm: { style.stroke: "#1B3139" }
 lb -> lgbm: joined feature vector { style.stroke: "#1B3139" }
 
 note: |md
+  **Mix-and-match cadence** — every tier publishes independently into **one** Lakebase online store; the model's FeatureLookups assemble across all of them at serving time. Pick the cheapest compute per tier: scheduled serverless jobs for daily/monthly/hourly, 30-s streaming only for burst counters.
   **Feed forward** — events use the last **completed** daily/monthly period until the next backfill.
-| { near: bottom-center; style: { font-size: 13; font-color: "#1B3139"; fill: "#FBFAF8" } }
+| { near: bottom-center; style: { font-size: 12; font-color: "#1B3139"; fill: "#FBFAF8" } }

@@ -1,0 +1,68 @@
+# Kafka-to-Kafka real-time path (portrait)
+# Render: d2 04_kafka_realtime.d2 04_kafka_realtime.svg
+# Layout: dagre (free). Never TALA for shared diagrams.
+
+direction: down
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    pad: 40
+  }
+}
+
+# --- Databricks palette ----------------------------------------------------
+classes: {
+  source:  { style: { fill: "#F4F1EC"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10; font-size: 20 } }
+  compute: { style: { fill: "#FFECE7"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10; font-size: 20 } }
+  store:   { style: { fill: "#E8EDEE"; stroke: "#1B3139"; stroke-width: 2; border-radius: 10; font-size: 20 } }
+  serve:   { style: { fill: "#FFD9D0"; stroke: "#FF3621"; stroke-width: 2; border-radius: 10; font-size: 20 } }
+  govern:  { style: { fill: "#1B3139"; stroke: "#1B3139"; font-color: "#FFFFFF"; border-radius: 10; font-size: 20 } }
+  group:   { style: { fill: "#FBFAF8"; stroke: "#C7CBD1"; stroke-dash: 3; border-radius: 14; font-size: 16; font-color: "#1B3139" } }
+}
+
+title: |md
+  # Kafka Real-Time Path (consume → score → produce)
+| { near: top-center; style: { font-size: 26; bold: true; font-color: "#1B3139" } }
+
+# ---------------------------------------------------------------- On-prem / PCI
+onprem: On-prem · PCI {
+  class: group
+  kin: Kafka\ntransactions (JSON) { class: source }
+  kout: Kafka\ndecisions { class: source }
+}
+
+# ---------------------------------------------------------------- Networking
+net: NCC · PrivateLink / VPC peering\nmTLS · UC secrets { class: govern }
+
+# ---------------------------------------------------------------- Databricks streaming
+dbx: Databricks streaming {
+  class: group
+  read: readStream(kafka)\nfrom_json / from_avro { class: compute }
+  feat: Streaming aggregation\n1h rolling counters { class: compute }
+  ftbl: Delta feature table { class: store }
+  score: foreachBatch\nquery serving endpoint { class: compute }
+  write: writeStream(kafka)\ndecision -> value { class: compute }
+}
+
+# ---------------------------------------------------------------- Online + serving
+online: Lakebase\nOnline Feature Store { class: store }
+ep: Model Serving\nautomatic feature lookup { class: serve }
+
+# ---------------------------------------------------------------- Flow
+onprem.kin -> net: transactions { style.stroke: "#1B3139" }
+net -> dbx.read: { style.stroke: "#1B3139" }
+dbx.read -> dbx.feat: { style.stroke: "#1B3139" }
+dbx.feat -> dbx.ftbl: write agg { style.stroke: "#1B3139" }
+dbx.ftbl -> online: CONTINUOUS publish { style.stroke: "#FF3621" }
+dbx.read -> dbx.score: micro-batch { style.stroke: "#1B3139" }
+online -> ep: online lookup { style.stroke: "#FF3621" }
+dbx.score -> ep: score request { style.stroke: "#1B3139" }
+ep -> dbx.score: decision { style.stroke: "#1B3139" }
+dbx.score -> dbx.write: { style.stroke: "#1B3139" }
+dbx.write -> net: decisions { style.stroke: "#1B3139" }
+net -> onprem.kout: { style.stroke: "#1B3139" }
+
+note: |md
+  **Freshness vs. decision latency** — a streaming aggregation lands in a Delta feature table that Lakebase auto-syncs via **CONTINUOUS** publish (no FE client in the hot loop); run the scoring stream in **Real-Time Mode** for sub-second per-transaction decisions. Measure the on-prem round-trip early — it is the true SLA gate.
+| { near: bottom-center; style: { font-size: 13; font-color: "#1B3139"; fill: "#FBFAF8" } }
