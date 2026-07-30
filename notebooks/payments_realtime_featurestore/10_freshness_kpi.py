@@ -4,38 +4,51 @@
 # MAGIC # 10 · Feature freshness KPI (P10/P50/P90/P99)
 # MAGIC
 # MAGIC Validates that the online feature store stays **fresh** under a sub-second event rate,
-# MAGIC end to end. It measures the clock that matters for real-time serving:
+# MAGIC measured **entirely through the Feature Engineering API** (`fe.write_table` +
+# MAGIC `fe.publish_table`) — the same path the rest of the demo and the serving endpoint use.
+# MAGIC No direct Lakebase/Postgres access.
 # MAGIC
 # MAGIC ```
-# MAGIC freshness = (moment the aggregated feature is READABLE in Lakebase) − (event_ts of the
-# MAGIC             newest event folded into it)
+# MAGIC freshness = (moment fe.publish_table makes the feature online-readable)
+# MAGIC             − (event_ts of the newest event folded into it)
 # MAGIC ```
 # MAGIC
 # MAGIC and reports the P10 / P50 / P90 / P99 of that freshness across many samples.
 # MAGIC
-# MAGIC ## Pipeline
+# MAGIC ## What the number tells you (important)
+# MAGIC `fe.publish_table(TRIGGERED)` provisions and runs a sync each call, which adds **seconds
+# MAGIC of fixed overhead per publish** — on the FEVM at 200 rows/s, 1-s tick, freshness measured
+# MAGIC **P50 ≈ 11.6 s** (only a handful of publishes complete in 60 s). That is the honest cost
+# MAGIC of the **triggered-publish API path**, and it is the right number for a *batch/triggered*
+# MAGIC cadence. For genuinely low-latency freshness (sub-second to low-seconds), use a
+# MAGIC **continuous** publish/stream so the sync is always-on rather than spun up per tick — the
+# MAGIC same batch-vs-continuous tradeoff called out for the 30-second counter path in `07`. This
+# MAGIC harness makes that cost measurable: point it at your candidate publish mode and read the
+# MAGIC percentiles.
+# MAGIC
+# MAGIC ## Pipeline (pure Feature Engineering API)
 # MAGIC ```
-# MAGIC sub-second batch generator → Delta raw_stream → running per-key aggregation
-# MAGIC   → upsert to Lakebase online table → read back to timestamp visibility → freshness
+# MAGIC sub-second batch generator → Delta raw_stream → per-key running aggregation
+# MAGIC   → fe.write_table (offline feature table) → fe.publish_table TRIGGERED (online sync)
+# MAGIC   → freshness = publish-return time − max(event_ts)
 # MAGIC ```
 # MAGIC
-# MAGIC - **Generator** — a driver-side loop that appends a **sub-second micro-batch** of rows to
-# MAGIC   a Delta table every `tick_seconds`, each row stamped with an `event_ts` at generation.
-# MAGIC   (The Spark **rate source** is the native generator, but a *background* `writeStream`
-# MAGIC   running alongside a driver polling loop is restricted on serverless Spark Connect, so
-# MAGIC   this uses a batch-append generator — the same "sub-second batches into Delta, as a
-# MAGIC   job" shape, without a background streaming query. `dbldatagen` wraps the rate source
-# MAGIC   the same way for load tests.)
-# MAGIC - **Aggregation → online** — the same loop reads the newest events, computes a per-key
-# MAGIC   running count, and upserts each key into the Lakebase online table. Every Feature
-# MAGIC   Engineering / Lakebase call stays on the driver (serverless Spark Connect forbids them
-# MAGIC   inside a streaming `foreachBatch` worker — see `07`).
-# MAGIC - **KPI** — freshness per sample = online-write time − max(event_ts) in that batch; we
-# MAGIC   also read the row back from Lakebase to include the read-visibility hop.
+# MAGIC - **Generator** — a driver-side loop appends a **sub-second micro-batch** of events to a
+# MAGIC   Delta table every `tick_seconds`, each stamped with `event_ts` at generation. (The
+# MAGIC   Spark **rate source** is the native generator, but a *background* `writeStream`
+# MAGIC   alongside a driver polling loop is restricted on serverless Spark Connect, so this uses
+# MAGIC   a batch-append generator — the same "sub-second batches into Delta, as a job" shape.
+# MAGIC   `dbldatagen` wraps the rate source the same way for load tests.)
+# MAGIC - **Aggregate → feature store** — the loop computes per-key running counts and calls
+# MAGIC   `fe.write_table(mode="merge")` then `fe.publish_table(publish_mode="TRIGGERED")`.
+# MAGIC   `publish_table` blocks until the online sync completes, so its return marks the moment
+# MAGIC   the feature is online-readable — that is the freshness clock, via the API alone.
+# MAGIC - Every FE call stays on the driver (serverless Spark Connect forbids them inside a
+# MAGIC   streaming `foreachBatch` worker — see `07`).
 
 # COMMAND ----------
 
-# MAGIC %pip install --quiet psycopg[binary] numpy
+# MAGIC %pip install --quiet databricks-feature-engineering numpy
 # MAGIC %restart_python
 
 # COMMAND ----------
@@ -44,101 +57,74 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("rows_per_second", "200", "Rate-source event rate (rows/sec)")
+dbutils.widgets.text("rows_per_second", "200", "Event rate (rows/sec)")
 dbutils.widgets.text("duration_seconds", "120", "How long to run the harness (seconds)")
-dbutils.widgets.text("tick_seconds", "1", "Aggregation micro-batch interval (seconds)")
+dbutils.widgets.text("tick_seconds", "1", "Micro-batch / publish interval (seconds)")
 ROWS_PER_SECOND = int(dbutils.widgets.get("rows_per_second"))
 DURATION = int(dbutils.widgets.get("duration_seconds"))
 TICK = float(dbutils.widgets.get("tick_seconds"))
 
 RAW_STREAM = f"{CATALOG}.{SCHEMA}.freshness_raw_stream"
+FT_FRESHNESS = f"{CATALOG}.{SCHEMA}.ft_freshness"
 
-import time, uuid
+import time
+import datetime as dt
 import numpy as np
 from pyspark.sql import functions as F
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Lakebase (online) connection
-# MAGIC Connects to the online-store Postgres and owns a small feature table for the KPI. Uses
-# MAGIC the injected `PGHOST` when present (Apps) or the SDK/REST here in a notebook; the OAuth
-# MAGIC token is the password.
-
-# COMMAND ----------
-
-import psycopg
-from databricks.sdk import WorkspaceClient
-
-wc = WorkspaceClient()
-LB_USER = wc.current_user.me().user_name
-
-
-def _lb_host() -> str:
-    # Older serverless/Apps SDKs lack wc.database; hit the REST API directly.
-    try:
-        return wc.database.get_database_instance(name=ONLINE_STORE).read_write_dns
-    except AttributeError:
-        return wc.api_client.do("GET", f"/api/2.0/database/instances/{ONLINE_STORE}")["read_write_dns"]
-
-
-def _lb_token() -> str:
-    try:
-        return wc.database.generate_database_credential(
-            request_id=str(uuid.uuid4()), instance_names=[ONLINE_STORE]).token
-    except AttributeError:
-        return wc.api_client.do("POST", "/api/2.0/database/credentials",
-                                body={"request_id": str(uuid.uuid4()),
-                                      "instance_names": [ONLINE_STORE]})["token"]
-
-
-LB_HOST = _lb_host()
-
-
-def lb_connect():
-    conn = psycopg.connect(host=LB_HOST, port=5432, dbname="databricks_postgres",
-                           user=LB_USER, password=_lb_token(), sslmode="require", autocommit=True)
-    with conn.cursor() as cur:
-        cur.execute("CREATE SCHEMA IF NOT EXISTS freshness_demo")
-        cur.execute("CREATE TABLE IF NOT EXISTS freshness_demo.feature ("
-                    "key bigint PRIMARY KEY, cnt bigint, "
-                    "event_ts timestamptz, online_ts timestamptz)")
-    return conn
-
-
-pg = lb_connect()
-print(f"Lakebase online store ready: {LB_HOST}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Generate + aggregate + sample freshness, each tick
-# MAGIC One driver-side loop does all three, `tick_seconds` apart:
-# MAGIC 1. **Generate** — append a sub-second micro-batch of `rows_per_second * tick_seconds`
-# MAGIC    rows to the Delta table, each stamped with `event_ts = now()` at generation and
-# MAGIC    bucketed to a small key space so the aggregation has repeat keys.
-# MAGIC 2. **Aggregate** — read the just-written batch, add to per-key running counts.
-# MAGIC 3. **Publish + sample** — upsert each key into Lakebase (timing the online write), read
-# MAGIC    one key back, and record freshness = online time − max(event_ts) in the batch.
-
-# COMMAND ----------
-
-import datetime as dt
 from pyspark.sql.types import StructType, StructField, LongType, TimestampType
+from databricks.feature_engineering import FeatureEngineeringClient
 
-spark.sql(f"DROP TABLE IF EXISTS {RAW_STREAM}")
-spark.sql(f"CREATE TABLE {RAW_STREAM} (key BIGINT, value BIGINT, event_ts TIMESTAMP) USING delta")
+fe = FeatureEngineeringClient()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Create the feature table + online store publication
+# MAGIC A single-key running-count feature, published to the same Lakebase-backed online store
+# MAGIC the rest of the demo uses — created through the Feature Engineering API.
+
+# COMMAND ----------
 
 SCHEMA_RAW = StructType([
     StructField("key", LongType()), StructField("value", LongType()),
     StructField("event_ts", TimestampType()),
 ])
-BATCH_ROWS = max(1, int(ROWS_PER_SECOND * TICK))
 NUM_KEYS = 50
+BATCH_ROWS = max(1, int(ROWS_PER_SECOND * TICK))
 
+spark.sql(f"DROP TABLE IF EXISTS {RAW_STREAM}")
+spark.sql(f"CREATE TABLE {RAW_STREAM} (key BIGINT, value BIGINT, event_ts TIMESTAMP) USING delta")
+
+# Seed the feature table over the full key universe so create_table has a schema + all keys.
+seed = spark.createDataFrame(
+    [(k, 0, dt.datetime.utcnow()) for k in range(NUM_KEYS)],
+    StructType([StructField("key", LongType()), StructField("cnt", LongType()),
+                StructField("feature_ts", TimestampType())]),
+)
+spark.sql(f"DROP TABLE IF EXISTS {FT_FRESHNESS}")
+fe.create_table(
+    name=FT_FRESHNESS,
+    primary_keys=["key"],
+    df=seed,
+    description="Freshness-KPI running counter (per key), materialized via the FE API.",
+)
+spark.sql(f"ALTER TABLE {FT_FRESHNESS} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
+
+store = fe.get_online_store(name=ONLINE_STORE)
+FT_ONLINE = f"{FT_FRESHNESS}_online"
+fe.publish_table(online_store=store, source_table_name=FT_FRESHNESS,
+                 online_table_name=FT_ONLINE, publish_mode="TRIGGERED")
+print(f"Feature table + online publication ready: {FT_FRESHNESS} -> {FT_ONLINE}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Generate + aggregate + publish, sampling freshness each tick
+
+# COMMAND ----------
 
 def generate_batch(start_value: int) -> tuple:
-    """Append BATCH_ROWS rows to Delta, each stamped now(); returns (rows, max_value)."""
+    """Append BATCH_ROWS rows to Delta, each stamped now(); returns (rows, next_value)."""
     now = dt.datetime.utcnow()
     rows = [(int((start_value + i) % NUM_KEYS), int(start_value + i), now)
             for i in range(BATCH_ROWS)]
@@ -146,9 +132,8 @@ def generate_batch(start_value: int) -> tuple:
     return rows, start_value + BATCH_ROWS
 
 
-freshness_write_ms = []   # online write time - event_ts
-freshness_read_ms = []    # read-back visible time - event_ts
-running = {}              # key -> cumulative count
+freshness_ms = []   # publish-return time − max(event_ts)
+running = {}
 next_value = 0
 
 deadline = time.time() + DURATION
@@ -162,29 +147,22 @@ while time.time() < deadline:
     # 2 · aggregate: per-key running counts over this batch.
     for k, _v, _ts in rows:
         running[k] = running.get(k, 0) + 1
-    keys_in_batch = sorted({k for k, _v, _ts in rows})
+    feat = spark.createDataFrame(
+        [(int(k), int(c), max_event_ts) for k, c in running.items()],
+        StructType([StructField("key", LongType()), StructField("cnt", LongType()),
+                    StructField("feature_ts", TimestampType())]),
+    )
 
-    # 3 · publish to Lakebase + sample freshness.
-    with pg.cursor() as cur:
-        for k in keys_in_batch:
-            cur.execute(
-                "INSERT INTO freshness_demo.feature (key, cnt, event_ts, online_ts) "
-                "VALUES (%s,%s,%s, now()) "
-                "ON CONFLICT (key) DO UPDATE SET cnt=EXCLUDED.cnt, "
-                "event_ts=EXCLUDED.event_ts, online_ts=now()",
-                (int(k), int(running[k]), max_event_ts),
-            )
-        cur.execute("SELECT online_ts FROM freshness_demo.feature WHERE key=%s",
-                    (int(keys_in_batch[0]),))
-        online_ts = cur.fetchone()[0]
-    read_now = dt.datetime.now(dt.timezone.utc)
-    ev = max_event_ts.replace(tzinfo=dt.timezone.utc)   # event_ts is naive UTC
-    freshness_write_ms.append((online_ts - ev).total_seconds() * 1000.0)
-    freshness_read_ms.append((read_now - ev).total_seconds() * 1000.0)
+    # 3 · materialize + publish through the FE API; publish_table blocks until online-readable.
+    fe.write_table(name=FT_FRESHNESS, df=feat, mode="merge")
+    fe.publish_table(online_store=store, source_table_name=FT_FRESHNESS,
+                     online_table_name=FT_ONLINE, publish_mode="TRIGGERED")
+    online_ready = dt.datetime.utcnow()
 
+    freshness_ms.append((online_ready - max_event_ts).total_seconds() * 1000.0)
     time.sleep(max(0.0, TICK - (time.time() - tick_start)))
 
-print(f"Collected {len(freshness_write_ms)} freshness samples.")
+print(f"Collected {len(freshness_ms)} freshness samples.")
 
 # COMMAND ----------
 
@@ -198,35 +176,20 @@ def pctls(vals):
     return {p: round(float(np.percentile(a, p)), 1) for p in (10, 50, 90, 99)}
 
 
-write_kpi = pctls(freshness_write_ms)
-read_kpi = pctls(freshness_read_ms)
-
-print("Feature freshness (ms) — event_ts -> online write:")
-for p, v in write_kpi.items():
-    print(f"  P{p}: {v} ms")
-print("\nFeature freshness (ms) — event_ts -> online read-visible (end-to-end):")
-for p, v in read_kpi.items():
+kpi = pctls(freshness_ms)
+print("Feature freshness (ms) — event_ts -> online-readable via fe.publish_table:")
+for p, v in kpi.items():
     print(f"  P{p}: {v} ms")
 
-# Persist the KPI so it can be tracked over time / across configs.
-import datetime as dt
 kpi_row = spark.createDataFrame([{
     "run_ts": dt.datetime.utcnow(),
     "rows_per_second": ROWS_PER_SECOND,
     "tick_seconds": TICK,
-    "samples": len(freshness_write_ms),
-    "write_p10": write_kpi[10], "write_p50": write_kpi[50],
-    "write_p90": write_kpi[90], "write_p99": write_kpi[99],
-    "read_p10": read_kpi[10], "read_p50": read_kpi[50],
-    "read_p90": read_kpi[90], "read_p99": read_kpi[99],
+    "samples": len(freshness_ms),
+    "p10": kpi[10], "p50": kpi[50], "p90": kpi[90], "p99": kpi[99],
 }])
 kpi_row.write.mode("append").saveAsTable(f"{CATALOG}.{SCHEMA}.freshness_kpi")
 print(f"\nAppended KPI row to {CATALOG}.{SCHEMA}.freshness_kpi")
 
-pg.close()
-
-# Surface the KPI in the run output too (P50 tracks the tick interval; lower `tick_seconds`
-# to tighten freshness, raise `rows_per_second` to stress it).
-summary = {"samples": len(freshness_write_ms), "rows_per_second": ROWS_PER_SECOND,
-           "tick_seconds": TICK, "write_ms": write_kpi, "read_ms": read_kpi}
-dbutils.notebook.exit(str(summary))
+dbutils.notebook.exit(str({"samples": len(freshness_ms), "rows_per_second": ROWS_PER_SECOND,
+                           "tick_seconds": TICK, "freshness_ms": kpi}))

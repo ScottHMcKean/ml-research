@@ -12,9 +12,6 @@ env:
     value: payments-scoring
   - name: BACKFILL_JOB_ID
     valueFrom: backfill-job
-  # Online-store instance for the direct Lakebase point-lookup stage.
-  - name: LAKEBASE_INSTANCE
-    value: payments-online-store
   # In-app Redpanda broker (Kafka wire protocol). Blank disables the Kafka stages.
   - name: REDPANDA_BROKER
     value: localhost:9092

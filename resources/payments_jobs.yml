@@ -136,22 +136,16 @@ resources:
   apps:
     payments_app:
       name: "payments-feature-store-demo"
-      description: "Instrumented latency walk: Kafka (in-app Redpanda) -> Lakebase -> serving -> Kafka."
+      description: "Instrumented latency walk: Kafka -> serving (automatic FE feature lookup) -> Kafka."
       source_code_path: ../notebooks/payments_realtime_featurestore/app
       resources:
         - name: backfill-job
           job:
             id: ${resources.jobs.payments_backfill_cache.id}
             permission: CAN_MANAGE_RUN
+        # Serving endpoint — the app queries it; the endpoint does the online feature lookup
+        # itself via the Feature Engineering API (the app never touches the online store).
         - name: serving-endpoint
           serving_endpoint:
             name: payments-scoring
             permission: CAN_QUERY
-        # Lakebase online store — the app connects to its Postgres for the direct point-lookup
-        # stage. The resource grants the app SP a Postgres role; the app authenticates with a
-        # generated OAuth token as the password.
-        - name: database
-          database:
-            instance_name: payments-online-store
-            database_name: databricks_postgres
-            permission: CAN_CONNECT_AND_CREATE

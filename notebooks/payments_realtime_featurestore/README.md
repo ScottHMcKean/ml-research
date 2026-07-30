@@ -10,12 +10,14 @@ seed events → declare features → publish online (Lakebase) → train LightGB
 ```
 
 A **Databricks App** walks a transaction through the architecture and **times each stage**,
-rendering one latency gauge per component: **1 Read** (Kafka) → **2 Update Lakebase** (a
-direct Postgres upsert+read on the online store) → **3 Inference** (serving endpoint) →
-**4 Write back** (Kafka). It uses an in-app Kafka broker when one is reachable and an
+rendering one latency gauge per component: **1 Read** (Kafka) → **2 Inference** (serving
+endpoint, which does the online **feature lookup itself via the Feature Engineering API**) →
+**3 Write back** (Kafka). It uses an in-app Kafka broker when one is reachable and an
 in-process queue otherwise (the Apps container ships no Kafka binary), so the Read/Write
-stages are always exercised; the Lakebase and inference stages are always real. **All data is
-synthetic and all names are generic** — this is a pattern reference, not tied to any company.
+stages are always exercised; the inference + feature-lookup stage is always real. The app
+never touches the online store directly — reads go through the Feature Engineering API inside
+the endpoint. **All data is synthetic and all names are generic** — this is a pattern
+reference, not tied to any company.
 
 ## Architecture
 
@@ -46,24 +48,23 @@ sequence), and `04_kafka_realtime` (Kafka consume → score → produce). Re-ren
 
 ### The app: a live latency walk
 The `app/` Databricks App is the narrative front-end. It walks a single payment authorization
-through the **same four-stage path as `03_latency_path`** and times each hop, so you can see
-where the milliseconds actually go:
+through the **same path as `03_latency_path`** and times each hop, so you can see where the
+milliseconds actually go:
 
 1. **Read** — consume the transaction from the Kafka topic (the event bus).
-2. **Update Lakebase** — upsert + read this instrument's rolling counter in the Lakebase
-   online store (a direct Postgres round-trip).
-3. **Inference** — call the model serving endpoint, which auto-joins the online features and
-   returns block/pass.
-4. **Write back** — publish the decision to the outbound Kafka topic.
+2. **Inference** — call the model serving endpoint; it looks up the online features **itself
+   via the Feature Engineering API** (the model was logged with `fe.log_model`, so automatic
+   feature lookup happens inside the endpoint) and returns block/pass.
+3. **Write back** — publish the decision to the outbound Kafka topic.
 
-The dashboard shows one gauge per stage (p50 headline, p99 sub-line, bar scaled to the
-slowest stage) plus end-to-end totals. **Start stream** runs a continuous flow; **Score one**
-walks a single transaction and prints its per-stage breakdown. The first request is slow (the
-serving endpoint cold-starts, the Lakebase connection warms up), so the numbers settle after a
-few seconds — on the FEVM, steady-state p50 was ~0 ms read, ~6 ms Lakebase, ~49 ms inference,
-~0 ms write-back, ~56 ms end-to-end.
+The feature-store read lives **inside** stage 2 — the app never talks to the online store
+directly, exactly as a production scorer would go through the endpoint. The dashboard shows
+one gauge per stage (p50 headline, p99 sub-line, bar scaled to the slowest stage) plus
+end-to-end totals. **Start stream** runs a continuous flow; **Score one** walks a single
+transaction and prints its per-stage breakdown. The first request is slow (the serving
+endpoint cold-starts), so the numbers settle after a few seconds.
 
-> **Transport caveat (honest):** the **Lakebase and inference stages are always real**. The
+> **Transport caveat (honest):** the **inference + feature-lookup stage is always real**. The
 > Read/Write stages use a real Kafka broker only if one is reachable; inside the Databricks
 > Apps container there is no Kafka binary, so they fall back to an **in-process queue** and the
 > UI says so. A real Kafka broker over the network is exercised by `09_kafka_io`, and
@@ -130,14 +131,19 @@ the architecture — measure it early. See `docs/architecture/04_kafka_realtime`
 
 ### Measuring freshness (the KPI behind Q1)
 
-`10_freshness_kpi.py` quantifies the Q1 freshness claim. A sub-second batch generator appends
-events to Delta (each stamped `event_ts`), a driver-side loop aggregates them and upserts to
-the Lakebase online store, and it reports the **P10/P50/P90/P99** of feature freshness =
-`(online-readable time) − (event_ts)`. It writes both the offline-write and end-to-end
-read-visible percentiles to `…payments.freshness_kpi`. On the FEVM at 200 rows/s with a 1-s
-tick: end-to-end P50 ≈ 1.4 s, P90 ≈ 1.5 s (P50 tracks the tick interval — lower `tick_seconds`
-to tighten it). This is the harness to point at any candidate refresh cadence to prove it
-meets an SLA. (On serverless it uses a driver-side batch-append generator rather than a
+`10_freshness_kpi.py` quantifies the Q1 freshness claim **through the Feature Engineering API
+only** — no direct Lakebase access. A sub-second batch generator appends events to Delta (each
+stamped `event_ts`), a driver-side loop aggregates them and calls `fe.write_table` +
+`fe.publish_table(TRIGGERED)`; because `publish_table` blocks until the online sync completes,
+its return marks the online-readable moment. It reports the **P10/P50/P90/P99** of freshness =
+`(publish-return time) − (event_ts)` to `…payments.freshness_kpi`. On the FEVM at 200 rows/s
+with a 1-s tick, **P50 ≈ 11.6 s** — because `publish_table(TRIGGERED)` spins up a sync run each
+call, adding seconds of fixed overhead per publish. That is the honest cost of the
+**triggered-publish** path and the right number for a batch/triggered cadence; for genuinely
+low-latency freshness use a **continuous** publish so the sync is always-on rather than
+per-tick (the same batch-vs-continuous tradeoff as the 30-second counter path in `07`). The
+harness makes that cost measurable — point it at your candidate publish mode and read the
+percentiles. (On serverless it uses a driver-side batch-append generator rather than a
 background rate-source stream — Spark Connect restricts a background `writeStream` running
 alongside a driver polling loop in one process.)
 
