@@ -18,7 +18,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "shm_skunkworks_catalog", "Unity Catalog catalog")
+dbutils.widgets.text("catalog", "main", "Unity Catalog catalog")
 dbutils.widgets.text("schema", "payments", "Schema for the demo artifacts")
 
 CATALOG = dbutils.widgets.get("catalog")

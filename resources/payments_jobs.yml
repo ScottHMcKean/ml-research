@@ -12,10 +12,10 @@
 variables:
   payments_catalog:
     description: Unity Catalog catalog for the demo artifacts. Override per workspace/env.
-    default: shm_skunkworks_catalog
+    default: main
 
 resources:
-  # The schema (shm_skunkworks_catalog.payments) and the registered model
+  # The schema (<catalog>.payments) and the registered model
   # (…payments.payments_lgbm) are created with literal names by 00_setup and 04 — they are
   # intentionally NOT declared here, because this bundle runs in `mode: development`, which
   # would prefix declared resource names (dev_<user>_…) and diverge from what the notebooks

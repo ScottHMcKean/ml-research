@@ -175,7 +175,7 @@ the per-stage latency gauges update live (read → Lakebase → inference → wr
 
 ## Benchmark vs sample targets
 
-`06_benchmark.py` writes results to `shm_skunkworks_catalog.payments.benchmark_results`. Compare against the
+`06_benchmark.py` writes results to `<catalog>.payments.benchmark_results`. Compare against the
 original sample's per-component targets:
 
 | Component | Sample target |

@@ -41,7 +41,7 @@ from pydantic import BaseModel
 from databricks.sdk import WorkspaceClient
 
 # ---------------------------------------------------------------------------- config
-CATALOG = os.getenv("CATALOG", "shm_catalog")
+CATALOG = os.getenv("CATALOG", "main")
 SCHEMA = os.getenv("SCHEMA", "payments")
 SERVING_ENDPOINT = os.getenv("SERVING_ENDPOINT", "payments-scoring")
 
