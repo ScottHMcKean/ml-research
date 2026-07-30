@@ -44,7 +44,7 @@ uc: Unity Catalog · offline {
 # ---------------------------------------------------------------- Jobs
 jobs: Jobs {
   class: group
-  cnt: Counter refresh\n1h rolling (5 min) { class: compute }
+  cnt: Counter refresh\n1h rolling (5-min batch / 30-s loop) { class: compute }
   bf: Backfill cache\ndaily / monthly { class: compute }
   train: Train LightGBM\ntraining set + log_model { class: compute }
 }

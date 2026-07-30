@@ -10,15 +10,12 @@
 # is a declarable bundle resource. Everything else (schema, model, jobs, app) is DABs.
 
 variables:
-  payments_warehouse_id:
-    description: SQL warehouse id the App uses to insert generated events into the raw table.
-    default: ""
   payments_catalog:
     description: Unity Catalog catalog for the demo artifacts. Override per workspace/env.
-    default: shm_skunkworks_catalog
+    default: main
 
 resources:
-  # The schema (shm_skunkworks_catalog.payments) and the registered model
+  # The schema (<catalog>.payments) and the registered model
   # (…payments.payments_lgbm) are created with literal names by 00_setup and 04 — they are
   # intentionally NOT declared here, because this bundle runs in `mode: development`, which
   # would prefix declared resource names (dev_<user>_…) and diverge from what the notebooks
@@ -77,6 +74,7 @@ resources:
               catalog: ${var.payments_catalog}
               grain: both
 
+    # Batch hot path: one full recompute per run, driven by the 5-minute schedule.
     payments_counters_refresh:
       name: "[${bundle.target}] Payments — Counter refresh (hot path, 5-min batch)"
       schedule:
@@ -89,20 +87,36 @@ resources:
             notebook_path: ../notebooks/payments_realtime_featurestore/07_streaming_counters.py
             base_parameters:
               catalog: ${var.payments_catalog}
+              mode: batch
 
-    # 30-second hot path (answers the burst-feature freshness question). Deployed unscheduled
-    # with max_ticks=1 so a bundle run / CI does a single refresh and stops. For a live 30-s
-    # hot path, set max_ticks=0 and run it as an always-running continuous job.
+    # 30-second hot path: same notebook in loop mode. Deployed unscheduled with max_ticks=1 so
+    # a bundle run / CI does a single refresh and stops. For a live 30-s hot path, set
+    # max_ticks=0 and run it as an always-running continuous job.
     payments_counters_refresh_rt:
       name: "[${bundle.target}] Payments — Counter refresh (hot path, 30-s loop)"
       tasks:
         - task_key: counters_rt
           notebook_task:
-            notebook_path: ../notebooks/payments_realtime_featurestore/07b_streaming_counters_rt.py
+            notebook_path: ../notebooks/payments_realtime_featurestore/07_streaming_counters.py
             base_parameters:
               catalog: ${var.payments_catalog}
+              mode: loop
               max_ticks: "1"
               trigger_seconds: "30"
+
+    # Feature freshness KPI: sub-second batch generator -> Delta -> aggregation -> Lakebase,
+    # reporting P10/50/90/99 of event->online freshness. Serverless.
+    payments_freshness_kpi:
+      name: "[${bundle.target}] Payments — Feature freshness KPI (P10/50/90/99)"
+      tasks:
+        - task_key: freshness_kpi
+          notebook_task:
+            notebook_path: ../notebooks/payments_realtime_featurestore/10_freshness_kpi.py
+            base_parameters:
+              catalog: ${var.payments_catalog}
+              rows_per_second: "200"
+              duration_seconds: "120"
+              tick_seconds: "1"
 
     # Kafka consume -> score -> produce reference. Inert unless kafka_bootstrap is set, so it
     # is safe to deploy; provide a broker at run time to activate it.
@@ -122,17 +136,15 @@ resources:
   apps:
     payments_app:
       name: "payments-feature-store-demo"
-      description: "Synthetic event generator, scorer, cache backfill trigger, and latency dashboard."
+      description: "Instrumented latency walk: Kafka -> serving (automatic FE feature lookup) -> Kafka."
       source_code_path: ../notebooks/payments_realtime_featurestore/app
       resources:
-        - name: sql-warehouse
-          sql_warehouse:
-            id: ${var.payments_warehouse_id}
-            permission: CAN_USE
         - name: backfill-job
           job:
             id: ${resources.jobs.payments_backfill_cache.id}
             permission: CAN_MANAGE_RUN
+        # Serving endpoint — the app queries it; the endpoint does the online feature lookup
+        # itself via the Feature Engineering API (the app never touches the online store).
         - name: serving-endpoint
           serving_endpoint:
             name: payments-scoring

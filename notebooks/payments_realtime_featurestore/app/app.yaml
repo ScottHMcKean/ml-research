@@ -1,16 +1,32 @@
 # Databricks App configuration.
 # Resource keys referenced via `valueFrom` are wired in resources/payments_jobs.yml
-# (app resources: the serving endpoint, the SQL warehouse, and the backfill job).
+# (app resources: the serving endpoint and the backfill job).
 command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
 
 env:
   - name: CATALOG
-    value: shm_catalog
+    value: main
   - name: SCHEMA
     value: payments
   - name: SERVING_ENDPOINT
     value: payments-scoring
-  - name: DATABRICKS_WAREHOUSE_ID
-    valueFrom: sql-warehouse
   - name: BACKFILL_JOB_ID
     valueFrom: backfill-job
+  # In-app Redpanda broker (Kafka wire protocol). Blank disables the Kafka stages.
+  - name: REDPANDA_BROKER
+    value: localhost:9092
+  - name: KAFKA_TOPIC
+    value: transactions
+  - name: KAFKA_TOPIC_OUT
+    value: decisions
+  # External-broker egress probe (/kafka_probe). Leave blank to disable. To test a managed
+  # broker, set EXT_KAFKA_BOOTSTRAP and the mechanism; inject the username/password from a
+  # secret scope via `valueFrom` — never hard-code credentials here.
+  - name: EXT_KAFKA_BOOTSTRAP
+    value: ""
+  - name: EXT_KAFKA_MECHANISM
+    value: "PLAIN"
+  # - name: EXT_KAFKA_USERNAME
+  #   valueFrom: kafka-username
+  # - name: EXT_KAFKA_PASSWORD
+  #   valueFrom: kafka-password
