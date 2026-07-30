@@ -52,6 +52,14 @@ REDPANDA_BROKER = os.getenv("REDPANDA_BROKER", "localhost:9092").strip()
 TOPIC_IN = os.getenv("KAFKA_TOPIC", "transactions")
 TOPIC_OUT = os.getenv("KAFKA_TOPIC_OUT", "decisions")
 
+# External-broker egress probe (optional). All values come from env/secrets only — never from
+# the request, never echoed back. Set these to test whether this app can reach a managed
+# broker (e.g. Confluent Cloud = PLAIN, Redpanda Cloud = SCRAM-SHA-256).
+EXT_KAFKA_BOOTSTRAP = os.getenv("EXT_KAFKA_BOOTSTRAP", "").strip()
+EXT_KAFKA_MECHANISM = os.getenv("EXT_KAFKA_MECHANISM", "PLAIN").strip()  # PLAIN|SCRAM-SHA-256|SCRAM-SHA-512
+EXT_KAFKA_USERNAME = os.getenv("EXT_KAFKA_USERNAME", "").strip()
+EXT_KAFKA_PASSWORD = os.getenv("EXT_KAFKA_PASSWORD", "").strip()
+
 STAGES = ["read", "lakebase", "inference", "write_back"]
 
 w = WorkspaceClient()
@@ -420,6 +428,32 @@ def health():
             "kafka_backend": "kafka" if _use_real_kafka() else "in-process queue",
             "broker_status": _broker_status,
             "endpoint": SERVING_ENDPOINT}
+
+
+@app.get("/kafka_probe")
+def kafka_probe():
+    """Bare egress diagnostic: can this app reach the external broker configured via env?
+
+    Reads broker/creds from env only; never accepts them from the request and never returns
+    the address, credentials, or raw error text. Response is deliberately minimal:
+    {configured, reachable, broker_count, mechanism, error_type}.
+    """
+    if not EXT_KAFKA_BOOTSTRAP:
+        return {"configured": False, "reachable": False,
+                "detail": "EXT_KAFKA_BOOTSTRAP unset"}
+    conf = {"bootstrap.servers": EXT_KAFKA_BOOTSTRAP, "socket.timeout.ms": 8000}
+    if EXT_KAFKA_USERNAME and EXT_KAFKA_PASSWORD:
+        conf.update({"security.protocol": "SASL_SSL", "sasl.mechanism": EXT_KAFKA_MECHANISM,
+                     "sasl.username": EXT_KAFKA_USERNAME, "sasl.password": EXT_KAFKA_PASSWORD})
+    try:
+        from confluent_kafka.admin import AdminClient
+        md = AdminClient(conf).list_topics(timeout=8)
+        return {"configured": True, "reachable": True,
+                "broker_count": len(md.brokers), "mechanism": EXT_KAFKA_MECHANISM}
+    except Exception as exc:
+        # Return only the exception type name — never the message (may contain host/creds).
+        return {"configured": True, "reachable": False, "mechanism": EXT_KAFKA_MECHANISM,
+                "error_type": type(exc).__name__}
 
 
 # --------------------------------------------------------------------------- dashboard
