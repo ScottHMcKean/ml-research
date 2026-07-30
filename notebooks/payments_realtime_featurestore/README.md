@@ -32,7 +32,7 @@ sequence), and `04_kafka_realtime` (Kafka consume → score → produce). Re-ren
 
 | Goal | Where |
 |------|-------|
-| Seed a table | `01_seed_data.py` → `shm_skunkworks_catalog.payments.raw_events` |
+| Seed a table | `01_seed_data.py` → `<catalog>.payments.raw_events` |
 | Declare features (Feature Engineering API) | `02_feature_engineering.py` — `FeatureEngineeringClient`, `FeatureLookup`, `FeatureFunction` |
 | Online serving (Lakebase) | `03_online_store.py` — `fe.create_online_store` + `fe.publish_table` |
 | LightGBM (section-4 pipeline) | `04_train_register.py` — training set + `fe.log_model` |
@@ -43,6 +43,32 @@ sequence), and `04_kafka_realtime` (Kafka consume → score → produce). Re-ren
 | Kafka consume → score → produce | `09_kafka_io.py` |
 | Per-stage latency walk (read → Lakebase → inference → write back) | `app/` (FastAPI Databricks App) |
 | Feature freshness KPI (P10/50/90/99) | `10_freshness_kpi.py` |
+
+### The app: a live latency walk
+The `app/` Databricks App is the narrative front-end. It walks a single payment authorization
+through the **same four-stage path as `03_latency_path`** and times each hop, so you can see
+where the milliseconds actually go:
+
+1. **Read** — consume the transaction from the Kafka topic (the event bus).
+2. **Update Lakebase** — upsert + read this instrument's rolling counter in the Lakebase
+   online store (a direct Postgres round-trip).
+3. **Inference** — call the model serving endpoint, which auto-joins the online features and
+   returns block/pass.
+4. **Write back** — publish the decision to the outbound Kafka topic.
+
+The dashboard shows one gauge per stage (p50 headline, p99 sub-line, bar scaled to the
+slowest stage) plus end-to-end totals. **Start stream** runs a continuous flow; **Score one**
+walks a single transaction and prints its per-stage breakdown. The first request is slow (the
+serving endpoint cold-starts, the Lakebase connection warms up), so the numbers settle after a
+few seconds — on the FEVM, steady-state p50 was ~0 ms read, ~6 ms Lakebase, ~49 ms inference,
+~0 ms write-back, ~56 ms end-to-end.
+
+> **Transport caveat (honest):** the **Lakebase and inference stages are always real**. The
+> Read/Write stages use a real Kafka broker only if one is reachable; inside the Databricks
+> Apps container there is no Kafka binary, so they fall back to an **in-process queue** and the
+> UI says so. A real Kafka broker over the network is exercised by `09_kafka_io`, and
+> `/kafka_probe` (creds from a secret scope, nothing echoed back) tests whether the app can
+> reach an external managed broker.
 
 ### Caching & "feed forward"
 Daily and monthly aggregates are stored in feature tables with a **timeseries column** set

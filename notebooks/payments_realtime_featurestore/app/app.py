@@ -484,22 +484,48 @@ _DASHBOARD_HTML = """
  .gauge .p50{font-size:2rem;font-weight:700;font-variant-numeric:tabular-nums}
  .gauge .unit{font-size:.9rem;color:var(--muted);font-weight:400}
  .gauge .p99{font-size:.8rem;color:var(--muted);margin-top:.15rem;font-variant-numeric:tabular-nums}
- .bar{height:6px;border-radius:3px;background:#333;margin-top:.6rem;overflow:hidden}
+ .gauge .desc{font-size:.72rem;color:var(--muted);margin-top:.5rem;line-height:1.35}
+ .bar{height:6px;border-radius:3px;background:#333;margin:.6rem 0;overflow:hidden}
  .bar > i{display:block;height:100%;border-radius:3px}
  .arrow{align-self:center;color:var(--muted);font-size:1.3rem}
  .totals{display:flex;gap:1.2rem;margin:.4rem 0 1rem;color:var(--muted);font-size:.9rem}
  .totals b{color:var(--ink);font-variant-numeric:tabular-nums}
+ .story{background:var(--card);border:1px solid rgba(255,255,255,.08);border-radius:12px;
+  padding:1rem 1.2rem;margin:1rem 0;font-size:.9rem;line-height:1.5;color:#c3c2b7}
+ .story b{color:var(--ink)} .story code{color:#e6e6e6;background:#0d0d0d;padding:0 .3rem;
+  border-radius:4px;font-size:.82rem}
  pre{background:var(--card);padding:1rem;border-radius:10px;color:#c3c2b7;font-size:.8rem;
   max-height:180px;overflow:auto}
+ .hint{font-size:.78rem;color:var(--muted);margin:.3rem 0 0}
 </style></head><body>
 <h1>Payments Real-Time Feature Store — Latency Walk</h1>
-<p class="sub">Read → Lakebase → serving → write back. Each gauge is one architecture stage;
- the number is p50 latency, the small line p99. <span id="backend"></span></p>
+<p class="sub">A single payment authorization, walked through the real-time scoring
+ architecture — with each component's latency measured live. <span id="backend"></span></p>
+
+<div class="story">
+ <b>What this shows.</b> Every transaction takes the same four-stage path from the
+ architecture diagram, and the app times each hop so you can see <b>where the milliseconds
+ go</b>:
+ <br>①&nbsp;<b>Read</b> — pull the transaction off the Kafka topic (the event bus).
+ &nbsp;→&nbsp; ②&nbsp;<b>Update Lakebase</b> — upsert &amp; read this instrument's rolling
+ counter in the online feature store (Postgres).
+ &nbsp;→&nbsp; ③&nbsp;<b>Inference</b> — call the model serving endpoint, which auto-joins the
+ online features and returns block/pass.
+ &nbsp;→&nbsp; ④&nbsp;<b>Write back</b> — publish the decision to the outbound Kafka topic.
+ <br><br><b>Reading the gauges.</b> The big number is <b>p50</b> (typical latency); the small
+ line is <b>p99</b> (tail). The first request is slower — the serving endpoint cold-starts and
+ the Lakebase connection warms up — so watch the numbers settle after a few seconds of stream.
+ <span id="transport-note"></span>
+</div>
+
 <div>
  <button class="primary" onclick="call('/generate?rate_per_sec=10','POST')">Start stream</button>
  <button onclick="call('/generate?stop=true','POST')">Stop</button>
  <button onclick="call('/score','POST')">Score one</button>
 </div>
+<p class="hint"><b>Start stream</b> runs a continuous flow of transactions; <b>Score one</b>
+ walks a single transaction and prints its per-stage timings below.</p>
+
 <div class="totals">
  <div>end-to-end p50 <b id="tp50">–</b> ms</div>
  <div>p99 <b id="tp99">–</b> ms</div>
@@ -508,18 +534,25 @@ _DASHBOARD_HTML = """
  <div>stream <b id="run">off</b></div>
 </div>
 <div class="flow" id="flow"></div>
-<pre id="log">Click "Score one" to walk a single transaction through the four stages.</pre>
+<pre id="log">Click "Score one" to walk a single transaction through the four stages — the response
+shows the per-stage latency breakdown.</pre>
 <script>
-const STAGES=[["read","1 · Read","var(--s1)"],["lakebase","2 · Update Lakebase","var(--s2)"],
- ["inference","3 · Inference","var(--s3)"],["write_back","4 · Write back","var(--s4)"]];
+// [key, label, color, description]
+const STAGES=[
+ ["read","1 · Read","var(--s1)","Consume the transaction from the Kafka topic (the event bus)."],
+ ["lakebase","2 · Update Lakebase","var(--s2)","Upsert + read the rolling counter in the Lakebase online store (Postgres)."],
+ ["inference","3 · Inference","var(--s3)","Serving endpoint scores it, auto-joining online features."],
+ ["write_back","4 · Write back","var(--s4)","Publish the block/pass decision to the outbound Kafka topic."],
+];
 const flow=document.getElementById('flow');
-STAGES.forEach(([k,label,color],i)=>{
+STAGES.forEach(([k,label,color,desc],i)=>{
  if(i>0){const a=document.createElement('div');a.className='arrow';a.textContent='→';flow.appendChild(a);}
  const g=document.createElement('div');g.className='gauge';g.id='g_'+k;
  g.innerHTML=`<div class="name">${label}</div>
   <div class="p50"><span id="p50_${k}">–</span><span class="unit"> ms</span></div>
   <div class="p99">p99 <span id="p99_${k}">–</span> ms</div>
-  <div class="bar"><i id="bar_${k}" style="width:0%;background:${color}"></i></div>`;
+  <div class="bar"><i id="bar_${k}" style="width:0%;background:${color}"></i></div>
+  <div class="desc">${desc}</div>`;
  flow.appendChild(g);
 });
 async function call(url,method){
@@ -544,6 +577,12 @@ async function refresh(){
 }
 fetch('/health').then(r=>r.json()).then(h=>{
  document.getElementById('backend').textContent='· transport: '+h.kafka_backend;
+ const real = h.kafka_backend && h.kafka_backend.indexOf('kafka')>=0;
+ document.getElementById('transport-note').innerHTML = real
+  ? '<br><br><b>Transport:</b> a real Kafka broker is handling the Read/Write stages.'
+  : '<br><br><b>Transport:</b> the Read/Write stages use an <b>in-process queue</b> — the '+
+    'Databricks Apps container ships no Kafka binary. Stages 2 (Lakebase) and 3 (inference) '+
+    'are always real. A real broker over the network is exercised by <code>09_kafka_io</code>.';
 });
 setInterval(refresh,1500); refresh();
 </script></body></html>
