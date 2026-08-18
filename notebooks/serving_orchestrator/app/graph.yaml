@@ -1,0 +1,41 @@
+# Compute-graph spec for the orchestrator.
+#
+# A graph is a DAG of typed `nodes`. A node's `inputs` list names the upstream
+# nodes feeding it — those are the edges. Source nodes (no `inputs`) receive the
+# graph's request body. The app runs the ancestors of the requested graph's
+# `output` node in topological order, passing each node's result downstream.
+#
+# Node types (see NODE_TYPES in app.py — add your own there):
+#   serving_endpoint  POST the resolved input to a Databricks serving endpoint at
+#                     https://<host>/serving-endpoints/<endpoint><path>
+#   transform         a pure-python function (see TRANSFORMS in app.py) applied to
+#                     {upstream_id: output}. Placeholder for "other nodes".
+#   constant          emits a fixed `value` (handy for wiring/testing)
+
+nodes:
+  - id: tree_pyfunc
+    type: serving_endpoint
+    endpoint: shm_tree_pyfunc_endpoint
+    path: /invocations
+
+  - id: tree_xgboost
+    type: serving_endpoint
+    endpoint: shm_tree_xgboost_endpoint
+    path: /invocations
+
+  # "Other node" example: a pure-python node that averages the numeric predictions
+  # returned by the two model nodes. Extend TRANSFORMS in app.py to add more.
+  - id: ensemble
+    type: transform
+    fn: mean_predictions
+    inputs: [tree_pyfunc, tree_xgboost]
+
+# Named graphs. `output` is the node whose result the graph returns; only that
+# node and its ancestors run.
+graphs:
+  ensemble_score:
+    output: ensemble
+  pyfunc_only:
+    output: tree_pyfunc
+  xgboost_only:
+    output: tree_xgboost
