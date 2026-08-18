@@ -1,0 +1,19 @@
+# Train + deploy the two tree-model serving endpoints for the orchestrator.
+# Serverless notebook jobs. Run after `databricks bundle deploy -t skunkworks`:
+#   databricks bundle run train_tree_pyfunc  -t skunkworks
+#   databricks bundle run train_tree_xgboost -t skunkworks
+resources:
+  jobs:
+    train_tree_pyfunc:
+      name: "[orchestrator] train + deploy tree pyfunc endpoint"
+      tasks:
+        - task_key: train_deploy
+          notebook_task:
+            notebook_path: ../notebooks/serving_orchestrator/01_train_deploy_pyfunc.ipynb
+
+    train_tree_xgboost:
+      name: "[orchestrator] train + deploy tree xgboost endpoint"
+      tasks:
+        - task_key: train_deploy
+          notebook_task:
+            notebook_path: ../notebooks/serving_orchestrator/02_train_deploy_xgboost.ipynb

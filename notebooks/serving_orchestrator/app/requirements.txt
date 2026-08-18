@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+pydantic>=2
+databricks-sdk>=0.40
+httpx
+pyyaml

@@ -1,0 +1,27 @@
+# Serving-endpoint orchestrator — Databricks App.
+#
+# The models live on the skunkworks FEVM, so deploy this to the same target:
+#   databricks bundle deploy -t skunkworks
+# (bundle deploy has no per-resource selector — it deploys every resource in the
+# bundle. To bring up just this app in isolation, use the apps CLI flow in the
+# notebooks/serving_orchestrator/README.md.)
+#
+# For every serving_endpoint node in the app's graph.yaml, add a matching
+# serving_endpoint resource below so the app's service principal is granted
+# CAN_QUERY.
+resources:
+  apps:
+    serving_orchestrator_app:
+      name: "serving-orchestrator"
+      description: "Config-driven FastAPI orchestrator over Databricks model serving endpoints."
+      source_code_path: ../notebooks/serving_orchestrator/app
+
+      resources:
+        - name: tree-pyfunc-endpoint
+          serving_endpoint:
+            name: shm_tree_pyfunc_endpoint
+            permission: CAN_QUERY
+        - name: tree-xgboost-endpoint
+          serving_endpoint:
+            name: shm_tree_xgboost_endpoint
+            permission: CAN_QUERY

@@ -1,0 +1,11 @@
+# Databricks App configuration.
+# The compute graph is declared in graph.yaml. Every serving_endpoint node must be
+# granted CAN_QUERY to this app's service principal via
+# resources/serving_orchestrator_app.yml.
+command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+env:
+  # CONFIG_PATH is left unset on purpose: app.py defaults to graph.yaml next to the
+  # source file (an absolute, cwd-independent path). Only set it to override.
+  - name: REQUEST_TIMEOUT_S
+    value: "300"
