@@ -69,6 +69,28 @@ done
 Only the per-serving **costs** change between scenarios; the LP model (variables, constraints,
 objective) is identical, so cuOpt simply re-solves for the cheapest diet under each cost regime.
 
+### Verified sweep (fevm-shm-skunkworks, 5 isolated runs, env v5, GPU_1xA10)
+
+All five scenarios solved to **Optimal**:
+
+| Scenario | Shock | Objective | Optimal plan (servings) |
+|---|---|---|---|
+| `baseline` | — | $11.83 | hamburger 0.61, milk 6.97, ice cream 2.59 |
+| `dairy_shock` | dairy ×1.5 | $16.99 | *unchanged* — milk stays optimal even +50% |
+| `meat_inflation` | meats ×1.4 | $11.94 | salad 0.26, milk 7.41, ice cream 2.96 (hamburger exits) |
+| `carb_discount` | carbs ×0.5 | $11.36 | fries 1.55, milk 9.94, ice cream 0.66 (fries enter) |
+| `broad_shock` | all ×1.25 | $14.79 | *unchanged* — uniform scaling, cost = baseline ×1.25 |
+
+Per-run timing on the warm pre-baked env: GPU-ready ~0.4–0.6 s, cuOpt solve ~0.14–0.16 s, total
+wall ~3.4–4.0 s — versus the ~3-min install-dominated cold start of the first (un-pre-baked) run.
+
+**Reliability note.** 3 of the 5 *first* attempts failed on transient infra and recovered on
+automatic retry: 2× `compute environment … failed to start within 900 seconds` (A10 capacity
+contention from launching 5 concurrent GPU runs) and 1× `Package hash mismatch` during the env
+build. Isolated runs contained each failure to its own scenario (nothing blocked the others).
+Hardening levers: stagger / cap concurrent A10 runs, and pin exact cuOpt wheel versions so the
+pre-baked env build is deterministic.
+
 ### CUDA 12 vs CUDA 13
 
 The job defaults to the **CUDA 12** build (`cuopt-cu12`), which matches the Kinaxis stack
@@ -80,7 +102,7 @@ CUDA 13 runtime, swap the environment dependencies for their `-cu13` equivalents
 
 - A GPU name/memory line from `nvidia-smi` (confirms you're on a GPU).
 - The nutritional-values DataFrame, then the model build (9 variables, 7 constraints).
-- An **optimal** solution — total cost around **$3** with a handful of foods at nonzero
+- An **optimal** solution — baseline total cost **$11.83** with a handful of foods at nonzero
   servings — followed by the per-category nutritional-intake check.
 - A sensitivity table: constraint **dual values** + **slack**, and per-food **reduced costs**.
 
