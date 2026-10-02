@@ -1,20 +1,39 @@
-# NVIDIA cuOpt diet-optimization LP (notebooks/cuopt_diet_optimization). The cuOpt test
-# vehicle for the Kinaxis "AI Runtime" POC — must run on Serverless GPU (A10 is enough).
-#
-# NOTE: this notebook requires Serverless GPU compute with serverless *environment version
-# 5 or 6* (CUDA 12 / torch 2.9 AI-runtime line). As of writing, the Databricks Asset Bundle
-# key for selecting Serverless GPU task compute (and pinning the environment version) is not
-# confirmed, so the compute is intentionally left unwired below rather than guessed.
-# Until confirmed, run the notebook interactively on Serverless GPU per the README.
+# NVIDIA cuOpt diet-optimization LP (notebooks/cuopt_diet_optimization) — the cuOpt (PDLP)
+# test vehicle for the Kinaxis "AI Runtime" POC. Runs on Serverless GPU (A10) with cuOpt
+# PRE-BAKED into the serverless environment (environment_version 5) so repeated runs reuse the
+# cached environment instead of pip-installing ~630 MB of wheels per run. A for_each task sweeps
+# price-shock scenarios in parallel against the same GPU environment.
 resources:
   jobs:
     cuopt_diet_optimization:
-      name: "[${bundle.target}] cuOpt diet optimization LP"
+      name: "[${bundle.target}] cuOpt diet optimization — price-shock sweep (Serverless GPU)"
       max_concurrent_runs: 1
+
+      # cuOpt pre-baked here (not %pip-installed in the notebook). Serverless caches this
+      # environment and reuses it warm across runs and across for_each iterations.
+      # For a CUDA 13 runtime, swap to cuopt-cu13 / nvidia-nvjitlink-cu13.
+      environments:
+        - environment_key: gpu_env
+          spec:
+            environment_version: "5"
+            dependencies:
+              - "--extra-index-url=https://pypi.nvidia.com"
+              - "cuopt-cu12"
+              - "nvidia-nvjitlink-cu12"
+              - "rapids-logger==0.1.19"
+
       tasks:
-        - task_key: solve_diet_lp
-          notebook_task:
-            notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
-          # TODO: confirm serverless GPU compute key (and how to pin serverless
-          # environment version 5/6) for a job task, then wire it here. Do not guess the
-          # YAML — serverless GPU job compute is preview and the DAB schema is unverified.
+        - task_key: price_shock_sweep
+          for_each_task:
+            # Run several scenarios in parallel on the same Serverless GPU environment.
+            concurrency: 3
+            inputs: '["baseline", "dairy_shock", "meat_inflation", "carb_discount", "broad_shock"]'
+            task:
+              task_key: solve_scenario
+              notebook_task:
+                notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
+                base_parameters:
+                  scenario_name: "{{input}}"
+              environment_key: gpu_env
+              compute:
+                hardware_accelerator: GPU_1xA10

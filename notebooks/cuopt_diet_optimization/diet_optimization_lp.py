@@ -12,6 +12,10 @@
 # MAGIC NVIDIA cuOpt Python API (PDLP, GPU-accelerated linear programming). The problem involves
 # MAGIC selecting foods to meet nutritional requirements while minimizing cost.
 # MAGIC
+# MAGIC It is **parameterized for a price-shock sweep**: the `cuopt_diet_optimization` job
+# MAGIC (`resources/cuopt_diet_jobs.yml`) fans this notebook out over several cost scenarios with a
+# MAGIC `for_each` task, all against the same pre-baked Serverless GPU environment.
+# MAGIC
 # MAGIC ## Problem Description
 # MAGIC
 # MAGIC We need to select quantities of different foods to:
@@ -24,43 +28,58 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Environment Setup
+# MAGIC ## Parameters & environment
 # MAGIC
-# MAGIC Install cuOpt from NVIDIA's package index. We default to the **CUDA 12** build
-# MAGIC (`cuopt-cu12`), which matches the Kinaxis stack (CUDA 12.7 wheel; the Serverless GPU AI
-# MAGIC runtime ships torch 2.9 / CUDA 12.9).
+# MAGIC cuOpt is **pre-baked into the Serverless GPU environment** by the job
+# MAGIC (`environment_version: "5"` + `cuopt-cu12` from `pypi.nvidia.com` in the job's
+# MAGIC `environments` block), so there is **no `%pip install` here** — repeated runs reuse the
+# MAGIC cached environment instead of reinstalling ~630 MB of wheels each time. To run this
+# MAGIC notebook interactively *without* the job environment, uncomment the fallback install below.
 # MAGIC
-# MAGIC To run against a **CUDA 13** runtime instead, swap the two packages below for their
-# MAGIC `-cu13` equivalents:
-# MAGIC `%pip install --extra-index-url=https://pypi.nvidia.com cuopt-cu13 nvidia-nvjitlink-cu13 rapids-logger==0.1.19`
+# MAGIC Parameters (widgets, also set per `for_each` iteration by the job):
+# MAGIC - `scenario_name` — a named price-shock scenario (see `PRICE_SCENARIOS` below).
+# MAGIC - `price_multipliers` — optional JSON `{food: multiplier}` that **overrides** the named
+# MAGIC   scenario, e.g. `{"milk": 1.5}`. Leave as `{}` to use `scenario_name`.
+# MAGIC
+# MAGIC To target a CUDA 13 runtime instead, use the `-cu13` packages in the job environment
+# MAGIC (`cuopt-cu13`, `nvidia-nvjitlink-cu13`).
 
 # COMMAND ----------
 
-# MAGIC %pip install --extra-index-url=https://pypi.nvidia.com cuopt-cu12 nvidia-nvjitlink-cu12 rapids-logger==0.1.19
+# Fallback for interactive runs that are NOT using the pre-baked job environment.
+# These are intentionally inactive (plain comments) so the pre-baked env is used by default.
+# To install manually, paste each into its OWN cell as a magic and run them:
+#   %pip install --extra-index-url=https://pypi.nvidia.com cuopt-cu12 nvidia-nvjitlink-cu12 rapids-logger==0.1.19
+#   %restart_python
 
 # COMMAND ----------
 
-# MAGIC %restart_python
+import json
+import time
+import subprocess
+
+# First executable cell = true notebook start (no %restart_python when the env is pre-baked).
+NOTEBOOK_START = time.time()
+
+dbutils.widgets.text("scenario_name", "baseline")
+dbutils.widgets.text("price_multipliers", "{}")  # optional JSON override, e.g. {"milk": 1.5}
+SCENARIO_NAME = dbutils.widgets.get("scenario_name")
+PRICE_MULTIPLIERS_OVERRIDE = dbutils.widgets.get("price_multipliers")
+
+print(f"scenario_name     = {SCENARIO_NAME!r}")
+print(f"price_multipliers = {PRICE_MULTIPLIERS_OVERRIDE!r}")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Confirm we are actually on a GPU
 # MAGIC
-# MAGIC Lean `nvidia-smi` sanity check so the run is unambiguous. We also drop a wall-clock
-# MAGIC checkpoint here (`NOTEBOOK_START`): the metric Kinaxis cares about is cold-start (notebook
-# MAGIC attach → GPU ready) versus the solve itself, so we record those separately below.
-# MAGIC
-# MAGIC Note: `%restart_python` above runs in a fresh kernel, so this checkpoint measures from the
-# MAGIC first post-restart cell — the `%pip install` time is a separate kernel session and is not
-# MAGIC included in `NOTEBOOK_START`.
+# MAGIC Lean `nvidia-smi` sanity check so the run is unambiguous. We also record wall-clock from
+# MAGIC `NOTEBOOK_START` so the job can report cold-start (notebook attach → GPU ready) versus the
+# MAGIC solve itself — the metric Kinaxis cares about. With the pre-baked environment there is no
+# MAGIC in-notebook install, so this checkpoint reflects true notebook start.
 
 # COMMAND ----------
-
-import time
-import subprocess
-
-NOTEBOOK_START = time.time()
 
 try:
     print(subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
@@ -75,6 +94,8 @@ print(f"GPU sanity check completed {gpu_ready_elapsed:.3f}s after notebook start
 
 # MAGIC %md
 # MAGIC ## Import Required Libraries
+# MAGIC
+# MAGIC `cuopt` is provided by the pre-baked Serverless GPU environment (or the fallback install above).
 
 # COMMAND ----------
 
@@ -143,6 +164,39 @@ nutrition_data = {
     "milk": [100, 8, 2.5, 125],
     "ice cream": [330, 8, 10, 180]
 }
+
+# COMMAND ----------
+
+# Apply the price-shock scenario. The LP model itself is unchanged — only the per-serving
+# costs are perturbed, so cuOpt re-solves for the cheapest diet under each cost regime.
+PRICE_SCENARIOS = {
+    "baseline": {},                                            # unchanged costs
+    "dairy_shock": {"milk": 1.5, "ice cream": 1.5},            # milk dominates the baseline plan
+    "meat_inflation": {"hamburger": 1.4, "chicken": 1.4, "hot dog": 1.4},
+    "carb_discount": {"fries": 0.5, "macaroni": 0.5, "pizza": 0.5},
+    "broad_shock": {"__all__": 1.25},                          # 25% across-the-board inflation
+}
+
+_override = PRICE_MULTIPLIERS_OVERRIDE.strip()
+if _override and _override != "{}":
+    multipliers = json.loads(_override)
+else:
+    multipliers = PRICE_SCENARIOS.get(SCENARIO_NAME, {})
+
+base_costs = dict(food_costs)
+if "__all__" in multipliers:
+    m = multipliers["__all__"]
+    food_costs = {k: round(v * m, 4) for k, v in food_costs.items()}
+else:
+    for food, mult in multipliers.items():
+        if food in food_costs:
+            food_costs[food] = round(food_costs[food] * mult, 4)
+
+print(f"Scenario: {SCENARIO_NAME!r}  multipliers={multipliers}")
+print("Food costs ($/serving):")
+for k in food_costs:
+    tag = "" if food_costs[k] == base_costs[k] else f"   (was ${base_costs[k]:.2f})"
+    print(f"  {k:10s} ${food_costs[k]:.2f}{tag}")
 
 # COMMAND ----------
 
@@ -370,3 +424,20 @@ else:
 # MAGIC WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # MAGIC See the License for the specific language governing permissions and
 # MAGIC limitations under the License.
+
+# COMMAND ----------
+
+# Return a compact result so each for_each iteration's outcome is visible in the run output.
+result = {
+    "scenario": SCENARIO_NAME,
+    "multipliers": multipliers,
+    "status": problem.Status.name,
+    "objective": round(problem.ObjValue, 4) if problem.Status.name == "Optimal" else None,
+    "plan": {v.getVariableName(): round(v.getValue(), 3)
+             for v in buy_vars.values() if v.getValue() > 1e-4},
+    "solve_time_s": round(solve_time, 4),
+    "gpu_ready_s": round(gpu_ready_elapsed, 4),
+    "wall_to_solve_s": round(time.time() - NOTEBOOK_START, 4),
+}
+print(json.dumps(result, indent=2))
+dbutils.notebook.exit(json.dumps(result))
