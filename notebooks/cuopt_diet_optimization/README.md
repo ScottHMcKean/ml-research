@@ -32,29 +32,39 @@ serverless environment so nothing installs per run.
 
 ## Parameterized price-shock sweep (the job)
 
-`resources/cuopt_diet_jobs.yml` declares the `cuopt_diet_optimization` job, which fans this
-notebook out over price-shock scenarios as **sibling parameterized tasks** (one per scenario,
-no dependencies) — all bound to the **same pre-baked Serverless GPU environment** and run in
-parallel.
+`resources/cuopt_diet_jobs.yml` declares the `cuopt_diet_optimization` job as a **single
+parameterized task** (`scenario_name` / `price_multipliers` job parameters) on the **pre-baked
+Serverless GPU environment**. The price-shock sweep is run as **independent, isolated runs** of
+this one job — one run per scenario:
 
-> **Why not `for_each`?** The natural fit is a `for_each` task, but Serverless GPU rejects it at
-> scheduling with `ForEach Tasks is not supported in Serverless GPU`. So the sweep is expressed
-> as explicit sibling tasks instead — same effect (parallel, shared env), supported construct.
+```bash
+for S in baseline dairy_shock meat_inflation carb_discount broad_shock; do
+  databricks jobs run-now <job_id> \
+    --json "{\"job_parameters\":{\"scenario_name\":\"$S\"}}" --no-wait --profile <PROFILE>
+done
+```
+
+> **Why isolated runs (not `for_each`, not sibling tasks)?** The natural fit is a `for_each`
+> task, but Serverless GPU rejects it at scheduling with
+> `ForEach Tasks is not supported in Serverless GPU`. Isolated runs of one parameterized job
+> give per-scenario **fault isolation** (one failing run can't sink the others), each on its own
+> A10, all drawing from the same cached environment — and the job definition stays a single,
+> reusable task.
 
 - **Pre-baked environment.** cuOpt is declared in the job's `environments` block
   (`environment_version: "5"`, `cuopt-cu12` + friends from `pypi.nvidia.com`), not
   `%pip install`ed in the notebook. Serverless **caches and reuses** that environment across
-  runs and tasks, so the ~630 MB install happens once (on the first cold env build) instead of
-  every run — this is what removes the install-dominated cold start.
-- **Per-task compute.** Each task carries `compute.hardware_accelerator: GPU_1xA10` +
+  runs, so the ~630 MB install happens once (on the first cold env build) instead of every run —
+  this is what removes the install-dominated cold start.
+- **Per-run compute.** The task carries `compute.hardware_accelerator: GPU_1xA10` +
   `environment_key: gpu_env`.
-- **Parameters.** The notebook reads two widgets, set per task by the job:
+- **Parameters.** The notebook reads two widgets, fed from the job parameters per run:
   - `scenario_name` — a named scenario from `PRICE_SCENARIOS` (`baseline`, `dairy_shock`,
     `meat_inflation`, `carb_discount`, `broad_shock`).
   - `price_multipliers` — optional JSON `{food: multiplier}` that overrides the named scenario.
-- **Result.** Each task ends with `dbutils.notebook.exit(...)` returning a compact JSON
+- **Result.** Each run ends with `dbutils.notebook.exit(...)` returning a compact JSON
   (`scenario`, `status`, `objective`, `plan`, and the timing split), so every scenario's
-  outcome is visible in the run output.
+  outcome is visible in its run output.
 
 Only the per-serving **costs** change between scenarios; the LP model (variables, constraints,
 objective) is identical, so cuOpt simply re-solves for the cheapest diet under each cost regime.

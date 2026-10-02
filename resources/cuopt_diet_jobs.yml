@@ -3,19 +3,30 @@
 # PRE-BAKED into the serverless environment (environment_version 5) so repeated runs reuse the
 # cached environment instead of pip-installing ~630 MB of wheels per run.
 #
-# The price-shock sweep is expressed as sibling parameterized tasks (one per scenario), run in
-# parallel, all bound to the same pre-baked gpu_env. NOTE: for_each_task is NOT supported on
-# Serverless GPU ("ForEach Tasks is not supported in Serverless GPU"), so we fan out with
-# explicit tasks instead.
+# The job is a SINGLE parameterized task (scenario_name / price_multipliers job parameters).
+# The price-shock sweep is run as independent, ISOLATED runs of this one job — one run per
+# scenario (`databricks jobs run-now --json '{"job_parameters":{"scenario_name":"..."}}'`).
+# Isolated runs give per-scenario fault isolation (one failing run can't sink the others), each
+# on its own A10, all sharing the same cached pre-baked environment.
+#
+# NOTE: for_each_task is NOT supported on Serverless GPU ("ForEach Tasks is not supported in
+# Serverless GPU"), which is why the sweep is driven as isolated runs rather than a for_each.
 resources:
   jobs:
     cuopt_diet_optimization:
-      name: "[${bundle.target}] cuOpt diet optimization — price-shock sweep (Serverless GPU)"
-      max_concurrent_runs: 1
+      name: "[${bundle.target}] cuOpt diet optimization — price-shock scenario (Serverless GPU)"
+      # Allow the isolated per-scenario runs to execute concurrently.
+      max_concurrent_runs: 10
+
+      # Job parameters drive the scenario; override per run with run-now --json job_parameters.
+      parameters:
+        - name: scenario_name
+          default: baseline
+        - name: price_multipliers
+          default: "{}"
 
       # cuOpt pre-baked here (not %pip-installed in the notebook). Serverless caches this
-      # environment and reuses it warm across runs and across tasks.
-      # For a CUDA 13 runtime, swap to cuopt-cu13 / nvidia-nvjitlink-cu13.
+      # environment and reuses it warm across runs. For CUDA 13, swap to the -cu13 packages.
       environments:
         - environment_key: gpu_env
           spec:
@@ -26,50 +37,13 @@ resources:
               - "nvidia-nvjitlink-cu12"
               - "rapids-logger==0.1.19"
 
-      # Each scenario is an independent task (no depends_on) so they run in parallel on the
-      # same Serverless GPU environment. Only scenario_name differs.
       tasks:
-        - task_key: baseline
+        - task_key: solve_scenario
           notebook_task:
             notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
             base_parameters:
-              scenario_name: baseline
-          environment_key: gpu_env
-          compute:
-            hardware_accelerator: GPU_1xA10
-
-        - task_key: dairy_shock
-          notebook_task:
-            notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
-            base_parameters:
-              scenario_name: dairy_shock
-          environment_key: gpu_env
-          compute:
-            hardware_accelerator: GPU_1xA10
-
-        - task_key: meat_inflation
-          notebook_task:
-            notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
-            base_parameters:
-              scenario_name: meat_inflation
-          environment_key: gpu_env
-          compute:
-            hardware_accelerator: GPU_1xA10
-
-        - task_key: carb_discount
-          notebook_task:
-            notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
-            base_parameters:
-              scenario_name: carb_discount
-          environment_key: gpu_env
-          compute:
-            hardware_accelerator: GPU_1xA10
-
-        - task_key: broad_shock
-          notebook_task:
-            notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
-            base_parameters:
-              scenario_name: broad_shock
+              scenario_name: "{{job.parameters.scenario_name}}"
+              price_multipliers: "{{job.parameters.price_multipliers}}"
           environment_key: gpu_env
           compute:
             hardware_accelerator: GPU_1xA10
