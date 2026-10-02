@@ -1,8 +1,12 @@
 # NVIDIA cuOpt diet-optimization LP (notebooks/cuopt_diet_optimization) — the cuOpt (PDLP)
 # test vehicle for the Kinaxis "AI Runtime" POC. Runs on Serverless GPU (A10) with cuOpt
 # PRE-BAKED into the serverless environment (environment_version 5) so repeated runs reuse the
-# cached environment instead of pip-installing ~630 MB of wheels per run. A for_each task sweeps
-# price-shock scenarios in parallel against the same GPU environment.
+# cached environment instead of pip-installing ~630 MB of wheels per run.
+#
+# The price-shock sweep is expressed as sibling parameterized tasks (one per scenario), run in
+# parallel, all bound to the same pre-baked gpu_env. NOTE: for_each_task is NOT supported on
+# Serverless GPU ("ForEach Tasks is not supported in Serverless GPU"), so we fan out with
+# explicit tasks instead.
 resources:
   jobs:
     cuopt_diet_optimization:
@@ -10,7 +14,7 @@ resources:
       max_concurrent_runs: 1
 
       # cuOpt pre-baked here (not %pip-installed in the notebook). Serverless caches this
-      # environment and reuses it warm across runs and across for_each iterations.
+      # environment and reuses it warm across runs and across tasks.
       # For a CUDA 13 runtime, swap to cuopt-cu13 / nvidia-nvjitlink-cu13.
       environments:
         - environment_key: gpu_env
@@ -22,18 +26,50 @@ resources:
               - "nvidia-nvjitlink-cu12"
               - "rapids-logger==0.1.19"
 
+      # Each scenario is an independent task (no depends_on) so they run in parallel on the
+      # same Serverless GPU environment. Only scenario_name differs.
       tasks:
-        - task_key: price_shock_sweep
-          for_each_task:
-            # Run several scenarios in parallel on the same Serverless GPU environment.
-            concurrency: 3
-            inputs: '["baseline", "dairy_shock", "meat_inflation", "carb_discount", "broad_shock"]'
-            task:
-              task_key: solve_scenario
-              notebook_task:
-                notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
-                base_parameters:
-                  scenario_name: "{{input}}"
-              environment_key: gpu_env
-              compute:
-                hardware_accelerator: GPU_1xA10
+        - task_key: baseline
+          notebook_task:
+            notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
+            base_parameters:
+              scenario_name: baseline
+          environment_key: gpu_env
+          compute:
+            hardware_accelerator: GPU_1xA10
+
+        - task_key: dairy_shock
+          notebook_task:
+            notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
+            base_parameters:
+              scenario_name: dairy_shock
+          environment_key: gpu_env
+          compute:
+            hardware_accelerator: GPU_1xA10
+
+        - task_key: meat_inflation
+          notebook_task:
+            notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
+            base_parameters:
+              scenario_name: meat_inflation
+          environment_key: gpu_env
+          compute:
+            hardware_accelerator: GPU_1xA10
+
+        - task_key: carb_discount
+          notebook_task:
+            notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
+            base_parameters:
+              scenario_name: carb_discount
+          environment_key: gpu_env
+          compute:
+            hardware_accelerator: GPU_1xA10
+
+        - task_key: broad_shock
+          notebook_task:
+            notebook_path: ../notebooks/cuopt_diet_optimization/diet_optimization_lp.py
+            base_parameters:
+              scenario_name: broad_shock
+          environment_key: gpu_env
+          compute:
+            hardware_accelerator: GPU_1xA10

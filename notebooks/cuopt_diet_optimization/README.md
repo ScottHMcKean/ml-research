@@ -33,21 +33,26 @@ serverless environment so nothing installs per run.
 ## Parameterized price-shock sweep (the job)
 
 `resources/cuopt_diet_jobs.yml` declares the `cuopt_diet_optimization` job, which fans this
-notebook out over price-shock scenarios with a `for_each` task — all on the **same Serverless
-GPU environment**, run in parallel (`concurrency: 3`).
+notebook out over price-shock scenarios as **sibling parameterized tasks** (one per scenario,
+no dependencies) — all bound to the **same pre-baked Serverless GPU environment** and run in
+parallel.
+
+> **Why not `for_each`?** The natural fit is a `for_each` task, but Serverless GPU rejects it at
+> scheduling with `ForEach Tasks is not supported in Serverless GPU`. So the sweep is expressed
+> as explicit sibling tasks instead — same effect (parallel, shared env), supported construct.
 
 - **Pre-baked environment.** cuOpt is declared in the job's `environments` block
   (`environment_version: "5"`, `cuopt-cu12` + friends from `pypi.nvidia.com`), not
   `%pip install`ed in the notebook. Serverless **caches and reuses** that environment across
-  runs and iterations, so the ~630 MB install happens once (on the first cold env build)
-  instead of every run — this is what removes the install-dominated cold start.
-- **Per-iteration compute.** Each nested task carries
-  `compute.hardware_accelerator: GPU_1xA10` + `environment_key: gpu_env`.
-- **Parameters.** The notebook reads two widgets, set per iteration by the job:
+  runs and tasks, so the ~630 MB install happens once (on the first cold env build) instead of
+  every run — this is what removes the install-dominated cold start.
+- **Per-task compute.** Each task carries `compute.hardware_accelerator: GPU_1xA10` +
+  `environment_key: gpu_env`.
+- **Parameters.** The notebook reads two widgets, set per task by the job:
   - `scenario_name` — a named scenario from `PRICE_SCENARIOS` (`baseline`, `dairy_shock`,
     `meat_inflation`, `carb_discount`, `broad_shock`).
   - `price_multipliers` — optional JSON `{food: multiplier}` that overrides the named scenario.
-- **Result.** Each iteration ends with `dbutils.notebook.exit(...)` returning a compact JSON
+- **Result.** Each task ends with `dbutils.notebook.exit(...)` returning a compact JSON
   (`scenario`, `status`, `objective`, `plan`, and the timing split), so every scenario's
   outcome is visible in the run output.
 
